@@ -12,7 +12,7 @@
 在 Debian/Ubuntu 桌面打开终端，切换到安装包所在目录后运行：
 
 ```sh
-sudo apt install ./netease-cloud-music-webkit_1.0.1_all.deb
+sudo apt install ./netease-cloud-music-webkit_1.0.2_all.deb
 ```
 
 APT 会根据本机发行版和架构解析安装包声明的全部依赖，并选择仓库可用的 WebKitGTK 接口。安装完成后，在应用菜单中搜索“网易云音乐”，或在终端执行：
@@ -182,6 +182,34 @@ WEBKIT_DISABLE_DMABUF_RENDERER=1 netease-cloud-music
 
 这是 WebKitGTK 提供的渲染排查选项，仅影响此次启动；不同版本和显卡的效果可能不同。应用采用单实例运行，已有窗口必须先关闭，重新运行命令才能让新的环境设置生效。若仍然白屏，请提供 `--check` 输出及完全退出后重新启动时的终端错误。
 
+## 网络排错与应用代理设置
+
+如果同一网址用 `curl` 请求返回 HTTP 200，而应用显示 HTTP 400，可以排查系统代理配置是否影响了应用请求。先完全退出应用，再临时直连启动：
+
+```sh
+env GIO_USE_PROXY_RESOLVER=dummy netease-cloud-music
+```
+
+这条命令仅用于本次启动。已有 Ubuntu 22.04 用户确认，遇到的 HTTP 400 问题在使用此命令后恢复了首页加载。
+
+v1.0.2 支持保存本应用的代理模式。若临时直连解决了问题，先完全退出应用，再保存直连设置：
+
+```sh
+netease-cloud-music --set-proxy-mode direct
+```
+
+该命令只保存设置，不启动窗口。之后从应用图标或普通命令启动时，都会使用已保存的直连模式。
+
+要恢复跟随系统代理，先完全退出应用，再运行：
+
+```sh
+netease-cloud-music --set-proxy-mode system
+```
+
+错误页也提供“使用直连并记住”和“使用系统代理并记住”按钮，可显式保存选择。默认模式仍为 `system`，不会因为网络错误自动绕过系统代理。
+
+设置保存在 `$XDG_CONFIG_HOME/netease-cloud-music/network.json`，未设置 `XDG_CONFIG_HOME` 时使用 `~/.config/netease-cloud-music/network.json`。它只影响本应用，不修改系统代理设置，也不清除 Cookie 或其他登录数据。
+
 ## 卸载
 
 若使用 .deb 安装：
@@ -217,7 +245,7 @@ sudo apt install bash coreutils dpkg tar gzip python3
 bash build-package.sh ./dist
 ```
 
-生成 `netease-cloud-music-webkit_1.0.1_all.deb` 和 `netease-cloud-music-1.0.1-source.tar.gz`。
+生成 `netease-cloud-music-webkit_1.0.2_all.deb` 和 `netease-cloud-music-1.0.2-source.tar.gz`。
 未提供输出目录时，使用源码目录下的 `dist`。
 在已安装运行依赖的环境中，可运行兼容性回归测试（无需打开窗口）：
 

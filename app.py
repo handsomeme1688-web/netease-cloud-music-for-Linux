@@ -6,11 +6,12 @@ import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 
@@ -66,6 +67,54 @@ def private_directory(base, fallback):
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.chmod(0o700)
     return path
+
+
+def network_settings_path():
+    base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    if not base.is_absolute():
+        base = Path.home() / ".config"
+    return base / STORAGE_NAME / "network.json"
+
+
+def read_proxy_mode(path=None):
+    path = network_settings_path() if path is None else Path(path)
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(settings, dict) and settings.get("proxy_mode") in ("system", "direct"):
+            return settings["proxy_mode"]
+    except (OSError, ValueError):
+        pass
+    return "system"
+
+
+def save_proxy_mode(mode, path=None):
+    if mode not in ("system", "direct"):
+        raise ValueError("未知的网络连接方式")
+    path = network_settings_path() if path is None else Path(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=".network-", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump({"proxy_mode": mode}, stream)
+            stream.write("\n")
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def apply_proxy_mode(manager, context, mode):
+    if mode not in ("system", "direct"):
+        raise ValueError("未知的网络连接方式")
+    proxy_mode = (WebKit2.NetworkProxyMode.NO_PROXY if mode == "direct"
+                  else WebKit2.NetworkProxyMode.DEFAULT)
+    if hasattr(manager, "set_network_proxy_settings"):
+        manager.set_network_proxy_settings(proxy_mode, None)
+    else:
+        # WebKitGTK 2.28/2.30 expose this setting on the context instead.
+        context.set_network_proxy_settings(proxy_mode, None)
 
 
 def supported_uri(uri):
@@ -126,6 +175,8 @@ class MusicApplication(Gtk.Application):
             str(self.data_dir / "cookies.sqlite"), WebKit2.CookiePersistentStorage.SQLITE)
         self.context = WebKit2.WebContext.new_with_website_data_manager(self.manager)
         self.context.set_sandbox_enabled(True)
+        self.proxy_mode = read_proxy_mode()
+        apply_proxy_mode(self.manager, self.context, self.proxy_mode)
         self.context.connect("download-started", self.on_download)
         icon = Path(__file__).resolve().parent / "assets" / "netease-cloud-music.svg"
         Gtk.IconTheme.get_default().append_search_path(str(icon.parent))
@@ -305,6 +356,10 @@ class MusicWindow(Gtk.ApplicationWindow):
         retry = Gtk.Button(label="重新加载")
         retry.connect("clicked", lambda *_: self.webview.load_uri(HOME_URL))
         error_box.pack_start(retry, False, False, 0)
+        self.network_button = Gtk.Button()
+        self.update_network_button()
+        self.network_button.connect("clicked", self.switch_proxy_mode)
+        error_box.pack_start(self.network_button, False, False, 0)
         self.stack.add_named(error_box, "error")
         self.create_window_controls()
         self.header_style = None
@@ -315,6 +370,26 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.connect("delete-event", self.before_close)
         self.connect("window-state-event", self.window_state_changed)
         self.show_all()
+
+    def update_network_button(self):
+        self.network_button.set_label("使用直连并记住" if self.app.proxy_mode == "system"
+                                      else "使用系统代理并记住")
+        self.network_button.set_tooltip_text("只更改本应用的连接方式，下次启动继续使用。")
+
+    def switch_proxy_mode(self, *_):
+        mode = "direct" if self.app.proxy_mode == "system" else "system"
+        try:
+            save_proxy_mode(mode)
+        except OSError as exc:
+            self.message("无法保存网络设置", str(exc))
+            return
+        self.webview.stop_loading()
+        apply_proxy_mode(self.app.manager, self.app.context, mode)
+        self.app.proxy_mode = mode
+        for window in self.app.get_windows():
+            if isinstance(window, MusicWindow):
+                window.update_network_button()
+        self.webview.load_uri(HOME_URL)
 
     def create_window_controls(self):
         # Native controls float over the page; there is no title bar or toolbar,
@@ -571,7 +646,18 @@ def main():
     parser = argparse.ArgumentParser(description="网易云音乐独立 WebKitGTK 桌面应用")
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--check", action="store_true", help="检查运行依赖，不打开窗口")
+    parser.add_argument("--set-proxy-mode", choices=("system", "direct"),
+                        help="保存本应用的网络方式后退出：system 使用系统代理，direct 使用直连")
     args = parser.parse_args()
+    if args.set_proxy_mode:
+        try:
+            save_proxy_mode(args.set_proxy_mode)
+        except OSError as exc:
+            print(f"无法保存网络设置：{exc}", file=sys.stderr)
+            return 1
+        label = "直连" if args.set_proxy_mode == "direct" else "系统代理"
+        print(f"已保存本应用的网络方式：{label}。请完全退出应用后重新打开。")
+        return 0
     if args.check:
         print(f"应用 {VERSION}; Python {sys.version.split()[0]}; "
               f"GTK {Gtk.MAJOR_VERSION}.{Gtk.MINOR_VERSION}.{Gtk.MICRO_VERSION}; "
@@ -579,6 +665,7 @@ def main():
         api = "evaluate_javascript" if hasattr(WebKit2.WebView, "evaluate_javascript") else "run_javascript"
         print(f"JavaScript 接口：{api}; 桌面会话：{os.environ.get('XDG_SESSION_TYPE', '未设置')}; "
               f"显示后端：{os.environ.get('GDK_BACKEND', '自动')}")
+        print(f"已保存的网络方式：{read_proxy_mode()}")
         return 0
     os.umask(0o077)
     app = MusicApplication()
