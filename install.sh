@@ -10,15 +10,8 @@ if [[ ! -f "$source_dir/app.py" ]]; then
   printf '找不到 app.py，请在完整源码目录中运行安装脚本。\n' >&2
   exit 1
 fi
-if ! /usr/bin/python3 - <<'PY'
-import gi
-gi.require_version("Gtk", "3.0")
-gi.require_version("WebKit2", "4.1")
-from gi.repository import Gtk, WebKit2
-PY
-then
-  printf '\n请先安装运行依赖，然后重新运行本脚本：\n' >&2
-  printf 'sudo apt install python3 python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1 gstreamer1.0-plugins-good gstreamer1.0-libav\n' >&2
+if ! /usr/bin/python3 "$source_dir/app.py" --check; then
+  printf '\n请先运行 bash install-dependencies.sh 安装依赖，然后重新运行本脚本。\n' >&2
   exit 1
 fi
 

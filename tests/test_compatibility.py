@@ -75,6 +75,25 @@ class ModernView:
         return self.zoom
 
 
+class LegacyStyleManager:
+    """Only the bulk CSS removal API exists on older WebKitGTK releases."""
+
+    def __init__(self, styles):
+        self.styles = list(styles)
+        self.scripts = [object()]
+
+    def remove_all_style_sheets(self):
+        self.styles.clear()
+
+    def add_style_sheet(self, style):
+        self.styles.append(style)
+
+
+class ModernStyleManager(LegacyStyleManager):
+    def remove_style_sheet(self, style):
+        self.styles.remove(style)
+
+
 class WebKitCompatibilityTests(unittest.TestCase):
     def test_legacy_view_without_evaluate_positions_controls(self):
         view = LegacyView()
@@ -115,6 +134,41 @@ class WebKitCompatibilityTests(unittest.TestCase):
 
         self.assertFalse(handled)
         decision.download.assert_not_called()
+
+    def test_old_style_manager_replaces_css_without_removing_scripts(self):
+        previous = object()
+        manager = LegacyStyleManager([previous])
+        self.assertFalse(hasattr(manager, "remove_style_sheet"))
+        scripts = list(manager.scripts)
+        updated = object()
+        window = SimpleNamespace(
+            header_style=previous,
+            webview=SimpleNamespace(get_user_content_manager=lambda: manager,
+                                    get_zoom_level=lambda: 1.5),
+            position_window_controls=Mock())
+
+        with patch.object(app.WebKit2.UserStyleSheet, "new", return_value=updated):
+            app.MusicWindow.sync_page_controls(window)
+
+        self.assertEqual(manager.styles, [updated])
+        self.assertEqual(manager.scripts, scripts)
+        self.assertIs(window.header_style, updated)
+        window.position_window_controls.assert_called_once_with()
+
+    def test_modern_style_manager_preserves_other_styles(self):
+        previous, other, updated = object(), object(), object()
+        manager = ModernStyleManager([previous, other])
+        window = SimpleNamespace(
+            header_style=previous,
+            webview=SimpleNamespace(get_user_content_manager=lambda: manager,
+                                    get_zoom_level=lambda: 1),
+            position_window_controls=Mock())
+
+        with patch.object(app.WebKit2.UserStyleSheet, "new", return_value=updated):
+            app.MusicWindow.sync_page_controls(window)
+
+        self.assertEqual(manager.styles, [other, updated])
+        self.assertIs(window.header_style, updated)
 
 
 class PlayerResponseTests(unittest.TestCase):

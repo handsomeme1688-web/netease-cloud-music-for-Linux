@@ -14,6 +14,10 @@ VERSION = "1.0.1"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 
+if sys.version_info < (3, 8):
+    print("需要 Python 3.8 或更新版本。", file=sys.stderr)
+    sys.exit(1)
+
 # Choose the display backend before GTK is imported. The parent process may
 # force GDK_BACKEND=x11 even on a Wayland desktop; that adds an XWayland path.
 # This override is local to this application, with X11 as an automatic fallback.
@@ -27,13 +31,30 @@ try:
     import gi
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
-    gi.require_version("WebKit2", "4.1")
+    WEBKIT_API = None
+    for api in ("4.1", "4.0"):
+        try:
+            gi.require_version("WebKit2", api)
+        except ValueError:
+            continue
+        WEBKIT_API = api
+        break
+    if WEBKIT_API is None:
+        raise ValueError("未安装 WebKit2 4.1 或 4.0 的运行组件")
+    # Choose one ABI before importing it; Soup 2 and Soup 3 cannot share a process.
     from gi.repository import Gdk, Gio, GLib, Gtk, WebKit2
 except (ImportError, ValueError) as exc:
-    print("缺少运行组件，请安装：\n"
-          "sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1 "
-          "gstreamer1.0-plugins-good gstreamer1.0-libav\n"
+    print("缺少运行组件。请通过 sudo apt install ./软件包.deb 安装完整依赖，\n"
+          "或在源码目录运行 bash install-dependencies.sh。\n"
+          "WebKit 组件优先使用 gir1.2-webkit2-4.1；较旧软件源可使用 gir1.2-webkit2-4.0。\n"
           f"详细信息：{exc}", file=sys.stderr)
+    sys.exit(1)
+
+if (Gtk.MAJOR_VERSION, Gtk.MINOR_VERSION) < (3, 24):
+    print("需要 GTK 3.24 或更新的 GTK 3 版本。", file=sys.stderr)
+    sys.exit(1)
+if (WebKit2.get_major_version(), WebKit2.get_minor_version()) < (2, 28):
+    print("需要 WebKitGTK 2.28 或更新版本。", file=sys.stderr)
     sys.exit(1)
 
 
@@ -109,7 +130,10 @@ class MusicApplication(Gtk.Application):
         icon = Path(__file__).resolve().parent / "assets" / "netease-cloud-music.svg"
         Gtk.IconTheme.get_default().append_search_path(str(icon.parent))
         if icon.exists():
-            Gtk.Window.set_default_icon_from_file(str(icon))
+            try:
+                Gtk.Window.set_default_icon_from_file(str(icon))
+            except GLib.Error as exc:
+                print(f"无法读取应用图标，请确认已安装 librsvg2-common：{exc.message}", file=sys.stderr)
         self.add_action_callback("quit", lambda *_: self.quit())
         self.set_accels_for_action("app.quit", ["<Primary>q"])
 
@@ -339,7 +363,12 @@ class MusicWindow(Gtk.ApplicationWindow):
         # body. Compensate for page zoom because native buttons keep their size.
         manager = self.webview.get_user_content_manager()
         if self.header_style:
-            manager.remove_style_sheet(self.header_style)
+            if hasattr(manager, "remove_style_sheet"):
+                manager.remove_style_sheet(self.header_style)
+            else:
+                # WebKitGTK 2.28 only exposes the bulk operation. This manager's
+                # styles are owned by the application; user scripts are retained.
+                manager.remove_all_style_sheets()
         zoom = self.webview.get_zoom_level()
         self.header_style = WebKit2.UserStyleSheet.new(
             "#page_pc_main_nav { padding-right: %.2fpx !important; }" % (144 / zoom),
@@ -546,7 +575,7 @@ def main():
     if args.check:
         print(f"应用 {VERSION}; Python {sys.version.split()[0]}; "
               f"GTK {Gtk.MAJOR_VERSION}.{Gtk.MINOR_VERSION}.{Gtk.MICRO_VERSION}; "
-              f"WebKitGTK {WebKit2.get_major_version()}.{WebKit2.get_minor_version()}.{WebKit2.get_micro_version()}")
+              f"WebKitGTK {WebKit2.get_major_version()}.{WebKit2.get_minor_version()}.{WebKit2.get_micro_version()} (API {WEBKIT_API})")
         api = "evaluate_javascript" if hasattr(WebKit2.WebView, "evaluate_javascript") else "run_javascript"
         print(f"JavaScript 接口：{api}; 桌面会话：{os.environ.get('XDG_SESSION_TYPE', '未设置')}; "
               f"显示后端：{os.environ.get('GDK_BACKEND', '自动')}")

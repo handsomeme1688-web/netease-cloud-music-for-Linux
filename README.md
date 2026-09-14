@@ -1,7 +1,7 @@
-# 网易云音乐 · Ubuntu 独立窗口版
+# 网易云音乐 · Linux 独立窗口版
 
-将 <https://music.163.com/st/webplayer> 作为独立 Ubuntu 桌面应用运行。
-使用 Python 3、GTK 3 和 WebKitGTK 4.1，不需要安装或借用 Chrome、Chromium、Electron。
+将 <https://music.163.com/st/webplayer> 作为独立 Debian/Ubuntu 桌面应用运行。
+使用 Python 3、GTK 3 和 WebKitGTK，优先加载 4.1 接口，旧系统可回退到 4.0 接口，不需要安装或借用 Chrome、Chromium、Electron。
 它拥有独立窗口、应用菜单入口和独立的网页登录数据；仍需联网访问网易云音乐网页。
 这是非官方网页封装客户端，界面、账号登录、曲库、会员权限及播放能力由原网站提供。
 
@@ -9,31 +9,125 @@
 
 从 [Releases 页面](https://github.com/handsomeme1688-web/netease-cloud-music-webkit/releases) 下载最新的 `.deb` 安装包。
 
-在 Ubuntu 桌面打开终端，切换到安装包所在目录后运行：
+在 Debian/Ubuntu 桌面打开终端，切换到安装包所在目录后运行：
 
 ```sh
 sudo apt install ./netease-cloud-music-webkit_1.0.1_all.deb
 ```
 
-APT 会安装所需系统依赖。安装完成后，在应用菜单中搜索“网易云音乐”，或在终端执行：
+APT 会根据本机发行版和架构解析安装包声明的全部依赖，并选择仓库可用的 WebKitGTK 接口。安装完成后，在应用菜单中搜索“网易云音乐”，或在终端执行：
 
 ```sh
 netease-cloud-music
 ```
 
-此包适用于软件源提供 `gir1.2-webkit2-4.1` 的 Ubuntu 版本。
+此包面向满足下列依赖的 Debian、Ubuntu 及其衍生发行版。
 `all` 表示本应用使用 Python 源码，不包含绑定 CPU 架构的二进制；WebKitGTK 等系统依赖仍须支持你的系统架构。
-运行需要图形桌面会话和互联网连接。
+运行需要已有的 X11 或 Wayland 图形桌面、会话 D-Bus、可用的音频输出和互联网连接。
+
+## 运行依赖
+
+最低接口要求为 **Python 3.8、GTK 3.24、WebKitGTK 2.28**。其中 4.1 接口需要 WebKitGTK 2.36 或以上；4.0 接口需要 2.28 或以上。`4.1`、`4.0` 是 GI 接口版本，`2.xx` 是 WebKitGTK 引擎版本。程序使用 GTK 3，因此 `gir1.2-webkit-6.0` 不能直接替代这两个接口。
+
+以下是本应用明确声明的运行依赖。Python 部分仅使用标准库和系统提供的 PyGObject：
+
+| 系统软件包 | 作用 |
+| --- | --- |
+| `python3`（≥ 3.8） | Python 解释器及标准库 |
+| `python3-gi`（≥ 3.36） | Python 调用 GTK、Gio 和 WebKitGTK 的绑定 |
+| `gir1.2-gtk-3.0`（≥ 3.24） | GTK 3、GDK 等图形接口 |
+| `gir1.2-webkit2-4.1`（≥ 2.36）或 `gir1.2-webkit2-4.0`（≥ 2.28） | 网页渲染接口；优先使用 4.1 |
+| `ca-certificates` | 验证 HTTPS 网站证书 |
+| `librsvg2-common` | 为 GdkPixbuf 提供 SVG 图标加载支持 |
+| `gstreamer1.0-plugins-base` | 基础音视频处理组件 |
+| `gstreamer1.0-plugins-good` | 常用音视频格式与流媒体组件 |
+| `gstreamer1.0-libav` | FFmpeg/libav 解码插件 |
+| `gstreamer1.0-plugins-good`（≥ 1.18）或 `gstreamer1.0-pulseaudio` | 提供 PulseAudio 输出，连接已有 PulseAudio 或 PipeWire 的 PulseAudio 兼容服务；较新 good 包已合并此插件 |
+| `gstreamer1.0-alsa` | ALSA 音频输出插件 |
+
+安装音频插件沿用系统现有音频服务，不会要求安装整个桌面，也不需要切换音频服务。
+
+### 由 APT 自动解析的系统库
+
+上述软件包还会按发行版和架构带入各自依赖，包括：
+
+- GLib、GObject、Gio、GObject Introspection，以及 GTK/GDK。
+- Pango、Cairo、GdkPixbuf、librsvg、字体渲染与图像解码库。
+- WebKitGTK 引擎和配套 JavaScriptCore。4.1 接口使用 libsoup 3，4.0 接口使用 libsoup 2.4，以及相应的 TLS/网络组件。
+- GStreamer 核心、音视频解码库、音频输出客户端库。
+- SQLite、系统 C/C++ 运行库、X11/Wayland 和图形渲染组件；需要时还有 WebKitGTK 沙箱组件。
+
+这些是传递依赖，具体包名、版本和 `.so` 文件会随发行版变化，应由 APT 根据包元数据完整解析，无需逐个手工安装或从其他发行版复制系统库。依赖关系可参考 Debian 官方的 [WebKitGTK 4.1 接口包](https://packages.debian.org/bookworm/gir1.2-webkit2-4.1)、[4.0 接口包](https://packages.debian.org/bookworm/gir1.2-webkit2-4.0)、[引擎运行库](https://packages.debian.org/bookworm/libwebkit2gtk-4.1-0)和 [SVG 加载模块](https://packages.debian.org/bookworm/librsvg2-common)。
+
+### 推荐与可选组件
+
+安装包推荐 `fonts-noto-cjk` 或 `fonts-wqy-microhei`，用于完整显示中文；并推荐 `dbus-user-session` 或 `dbus-x11`，为桌面应用提供会话 D-Bus。已有完整桌面的系统通常已经具备会话服务。Noto 字体支持的文字范围见 [Debian 官方字体说明](https://packages.debian.org/bookworm/fonts-noto-cjk)。
+
+按需安装中文字体：
+
+```sh
+sudo apt install fonts-noto-cjk
+```
+
+如特定音视频格式缺少插件，可按需补充 [GStreamer bad 插件集](https://packages.debian.org/bookworm/gstreamer1.0-plugins-bad)和 [ugly 插件集](https://packages.debian.org/bookworm/gstreamer1.0-plugins-ugly)：
+
+```sh
+sudo apt install gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
+```
+
+额外插件不能改变网站的会员、版权或浏览器能力限制。`desktop-file-utils` 和 `gtk-update-icon-cache` 仅用于安装后刷新桌面入口及图标缓存，安装脚本会在这些工具存在时调用。
+
+## 发行版范围与包可用性
+
+下表根据官方软件包索引、发行说明和历史归档核对，列出依赖可用的安装路线。**软件包可用、达到最低 API 门槛，不等于所有网页功能或所有硬件都已实机验证。**目前实际图形运行验证环境为 Ubuntu 26.04；其他列出的版本仍需结合本机显示驱动、桌面、音频、网络和网站响应验证。
+
+| 发行版 | 默认 Python 3 | GTK 3 | 官方源中的 WebKitGTK 接口与安装路线 |
+| --- | --- | --- | --- |
+| Debian 11 Bullseye | [3.9](https://packages.debian.org/bullseye/python3) | [3.24](https://packages.debian.org/bullseye/gir1.2-gtk-3.0) | 使用 [4.0](https://packages.debian.org/bullseye/gir1.2-webkit2-4.0) |
+| Debian 12 Bookworm | [3.11](https://packages.debian.org/bookworm/python3) | [3.24](https://packages.debian.org/bookworm/gir1.2-gtk-3.0) | 优先 [4.1](https://packages.debian.org/bookworm/gir1.2-webkit2-4.1)，也提供 [4.0](https://packages.debian.org/bookworm/gir1.2-webkit2-4.0) |
+| Debian 13 Trixie | [3.13](https://packages.debian.org/trixie/python3) | [3.24](https://packages.debian.org/trixie/gir1.2-gtk-3.0) | 使用 [4.1](https://packages.debian.org/trixie/gir1.2-webkit2-4.1) |
+| Ubuntu 20.04 LTS Focal | [3.8](https://ubuntu.com/developers/docs/reference/availability/python/) | [3.24](https://lists.ubuntu.com/archives/focal-changes/2024-July/048677.html) | 使用 4.0；见官方 [Focal 软件包记录](https://lists.ubuntu.com/archives/ubuntu-studio-devel/2020-July/009373.html)与 [WebKitGTK 更新记录](https://lists.ubuntu.com/archives/focal-changes/2022-November/037110.html) |
+| Ubuntu 22.04 LTS Jammy | [3.10](https://ubuntu.com/developers/docs/reference/availability/python/) | [3.24](https://packages.ubuntu.com/jammy/gir1.2-gtk-3.0) | 优先 [4.1](https://packages.ubuntu.com/jammy/gir1.2-webkit2-4.1)（universe），也提供 [4.0](https://packages.ubuntu.com/jammy/gir1.2-webkit2-4.0) |
+| Ubuntu 24.04 LTS Noble | [3.12](https://ubuntu.com/developers/docs/reference/availability/python/) | [3.24](https://packages.ubuntu.com/noble/gir1.2-gtk-3.0) | 使用 [4.1](https://packages.ubuntu.com/noble/gir1.2-webkit2-4.1) |
+| Ubuntu 26.04 LTS Resolute | [3.14](https://packages.ubuntu.com/en/resolute/python3) | [3.24](https://packages.ubuntu.com/source/resolute/gtk%2B3.0) | 使用 [4.1](https://packages.ubuntu.com/resolute/gir1.2-webkit2-4.1) |
+
+表中的 Python/GTK 版本为主、次版本，补丁版本会随更新变化。旧发行版需保持其官方更新源可用；Ubuntu 部分依赖位于 universe，应先启用该组件并刷新软件包索引。其他 Debian 系发行版可按其基础版本和自身软件源选择 4.1 或 4.0，不能仅凭“基于 Debian”保证可运行。
+
+可先检查本机仓库提供的候选版本：
+
+```sh
+apt-cache policy python3 gir1.2-gtk-3.0 gir1.2-webkit2-4.1 gir1.2-webkit2-4.0
+```
 
 ## 仅安装到当前用户
 
-先安装依赖：
+在完整源码目录中，推荐先运行依赖安装脚本。脚本刷新 APT 软件包索引，优先选择仓库可用的 4.1 接口，不可用时选择 4.0：
 
 ```sh
-sudo apt install python3 python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1 gstreamer1.0-plugins-good gstreamer1.0-libav
+bash install-dependencies.sh
 ```
 
-解压源码包，在源码目录运行，无需 sudo：
+也可以手工安装。软件源提供 4.1 时运行：
+
+```sh
+sudo apt update
+sudo apt install python3 python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.1 \
+  ca-certificates librsvg2-common gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good gstreamer1.0-libav \
+  gstreamer1.0-pulseaudio gstreamer1.0-alsa
+```
+
+旧发行版只有 4.0 时运行：
+
+```sh
+sudo apt update
+sudo apt install python3 python3-gi gir1.2-gtk-3.0 gir1.2-webkit2-4.0 \
+  ca-certificates librsvg2-common gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good gstreamer1.0-libav \
+  gstreamer1.0-pulseaudio gstreamer1.0-alsa
+```
+
+两条命令选择一条即可。然后在源码目录运行用户安装脚本，无需 sudo：
 
 ```sh
 bash install.sh
@@ -43,6 +137,8 @@ bash install.sh
 应用菜单入口保存在 `~/.local/share/applications`，不依赖 `~/.local/bin` 是否已加入 `PATH`。
 安装和卸载支持绝对路径的 `XDG_DATA_HOME`、`XDG_CACHE_HOME`、`XDG_CONFIG_HOME`，并允许用 `XDG_BIN_HOME` 改变启动器目录。
 含空格的路径会正确引用。卸载时请保持与安装时相同的这些环境变量。
+
+依赖脚本需要系统提供 `apt-get`、`apt-cache`、`dpkg` 和 `awk`，普通用户运行时还需要 `sudo`；这些通常由 Debian/Ubuntu 基础系统提供。
 
 ## 登录与播放
 
@@ -65,7 +161,7 @@ Wayland 桌面下，应用优先使用原生 Wayland，连接不可用时自动�
 
 ## Ubuntu 22.04 与启动排查
 
-最低运行依赖为 Python 3.10、WebKitGTK 2.36。v1.0.1 为 WebKitGTK 2.36–2.38 补充了旧版 JavaScript 接口和网页响应处理兼容，避免在创建窗口时调用不存在的方法。
+最低依赖见“运行依赖”一节。v1.0.1 补充了旧版 JavaScript 接口和网页响应处理兼容，避免在较旧的 WebKitGTK 中调用不存在的方法。发行版名称不能直接判断 WebKitGTK 版本：同一系统可能已通过官方更新获得较新的引擎。
 
 v1.0.1 同时修正了首页被当成下载文件的处理：对返回 HTML 的播放器首页明确执行页面显示；对非网页内容、空响应或 HTTP 错误显示具体状态、WebKit 内容类型和原始响应头，不再弹出保存 `webplayer` 的对话框。正常重定向和其他地址的下载仍由各自流程处理。
 
@@ -106,10 +202,16 @@ bash uninstall.sh --purge
 
 ## 从源码构建
 
-构建只需要 `bash`、`dpkg-deb`、`tar` 和常用系统工具，不需要 root、网络或安装 GUI 运行依赖：
+构建工具为 `bash`、`coreutils`、`dpkg`（提供 `dpkg-deb`）、`tar`、`gzip` 和 `python3`。其中 `coreutils` 提供复制、创建目录、计算体积和临时目录等命令；`gzip` 用于源码压缩包。安装构建工具：
 
 ```sh
-bash build-package.sh /绝对路径/outputs
+sudo apt install bash coreutils dpkg tar gzip python3
+```
+
+工具就绪后，构建本身无需 root、网络或 GUI 运行依赖：
+
+```sh
+bash build-package.sh ./dist
 ```
 
 生成 `netease-cloud-music-webkit_1.0.1_all.deb` 和 `netease-cloud-music-1.0.1-source.tar.gz`。
@@ -119,5 +221,7 @@ bash build-package.sh /绝对路径/outputs
 ```sh
 python3 -m unittest discover -s tests -v
 ```
+
+仓库提供七种发行版的 [自动兼容性检查](https://github.com/handsomeme1688-web/netease-cloud-music-webkit/actions/workflows/compatibility.yml)，验证 `.deb` 依赖安装、运行库加载、SVG 图标、音频插件和回归测试。容器检查不包含真实显卡、桌面会话、账号登录或在线音乐播放。
 
 图标的原始品牌图像来自[网易云音乐官网提供的高清标识](https://p3.music.126.net/9z9CeujRSPOPm7Rq2DFw_g==/6674035581283071.jpg)，在 SVG 中采用参考 macOS 的连续圆角裁剪、透明留白与轻微阴影，以适配桌面图标的显示。本软件仍是非官方网页封装。

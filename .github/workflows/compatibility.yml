@@ -1,0 +1,70 @@
+name: Debian and Ubuntu compatibility
+
+on:
+  push:
+    branches: [main]
+    paths: [app.py, "*.sh", "packaging/**", "assets/**", "tests/**", .github/workflows/compatibility.yml]
+  pull_request:
+    paths: [app.py, "*.sh", "packaging/**", "assets/**", "tests/**", .github/workflows/compatibility.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        image:
+          - debian:11
+          - debian:12
+          - debian:13
+          - ubuntu:20.04
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - ubuntu:26.04
+    container:
+      image: ${{ matrix.image }}
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      PYTHONDONTWRITEBYTECODE: "1"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install build and verification tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git python3 bash coreutils dpkg tar gzip gstreamer1.0-tools desktop-file-utils
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Build and install the package with APT
+        run: |
+          bash build-package.sh "$RUNNER_TEMP/packages"
+          packages=("$RUNNER_TEMP/packages/"*.deb)
+          apt-get install -y --no-install-recommends "${packages[@]}"
+      - name: Check runtime imports, image loader and audio plugins
+        run: |
+          netease-cloud-music --check
+          python3 - <<'PY'
+          import gi
+          gi.require_version("GdkPixbuf", "2.0")
+          from gi.repository import GdkPixbuf
+          icon = GdkPixbuf.Pixbuf.new_from_file("/usr/share/netease-cloud-music/assets/netease-cloud-music.svg")
+          assert icon.get_width() > 0 and icon.get_height() > 0
+          print("SVG icon loader: OK")
+          PY
+          gst-inspect-1.0 autoaudiosink >/dev/null
+          gst-inspect-1.0 pulsesink >/dev/null
+          gst-inspect-1.0 alsasink >/dev/null
+          gst-inspect-1.0 avdec_aac >/dev/null
+          desktop-file-validate /usr/share/applications/netease-cloud-music.desktop
+      - name: Run compatibility regression tests
+        run: python3 -m unittest discover -s tests -v
