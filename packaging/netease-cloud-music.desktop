@@ -12,4 +12,3 @@ Terminal=false
 Categories=AudioVideo;Audio;Music;
 StartupNotify=true
 StartupWMClass=io.github.neteasecloudmusic.WebPlayer
-SingleMainWindow=true
