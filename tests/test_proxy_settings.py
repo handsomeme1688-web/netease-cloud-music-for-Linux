@@ -119,24 +119,36 @@ class WebKitProxyModeTests(unittest.TestCase):
         manager = SimpleNamespace(set_network_proxy_settings=Mock())
         context = SimpleNamespace(set_network_proxy_settings=Mock())
         for mode, expected in (
-                ("direct", app.WebKit2.NetworkProxyMode.NO_PROXY),
+                ("direct", app.WebKit2.NetworkProxyMode.CUSTOM),
                 ("system", app.WebKit2.NetworkProxyMode.DEFAULT)):
             with self.subTest(mode=mode):
                 manager.set_network_proxy_settings.reset_mock()
                 app.apply_proxy_mode(manager, context, mode)
-                manager.set_network_proxy_settings.assert_called_once_with(expected, None)
+                manager.set_network_proxy_settings.assert_called_once()
+                actual_mode, settings = manager.set_network_proxy_settings.call_args.args
+                self.assertEqual(actual_mode, expected)
+                if mode == "direct":
+                    self.assertIsInstance(settings, app.WebKit2.NetworkProxySettings)
+                else:
+                    self.assertIsNone(settings)
         context.set_network_proxy_settings.assert_not_called()
 
     def test_legacy_context_applies_direct_and_restores_system(self):
         manager = SimpleNamespace()
         context = SimpleNamespace(set_network_proxy_settings=Mock())
         for mode, expected in (
-                ("direct", app.WebKit2.NetworkProxyMode.NO_PROXY),
+                ("direct", app.WebKit2.NetworkProxyMode.CUSTOM),
                 ("system", app.WebKit2.NetworkProxyMode.DEFAULT)):
             with self.subTest(mode=mode):
                 context.set_network_proxy_settings.reset_mock()
                 app.apply_proxy_mode(manager, context, mode)
-                context.set_network_proxy_settings.assert_called_once_with(expected, None)
+                context.set_network_proxy_settings.assert_called_once()
+                actual_mode, settings = context.set_network_proxy_settings.call_args.args
+                self.assertEqual(actual_mode, expected)
+                if mode == "direct":
+                    self.assertIsInstance(settings, app.WebKit2.NetworkProxySettings)
+                else:
+                    self.assertIsNone(settings)
 
     def test_missing_preference_keeps_system_and_does_not_change_resolver_environment(self):
         manager = SimpleNamespace(set_network_proxy_settings=Mock())

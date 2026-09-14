@@ -108,13 +108,18 @@ def save_proxy_mode(mode, path=None):
 def apply_proxy_mode(manager, context, mode):
     if mode not in ("system", "direct"):
         raise ValueError("未知的网络连接方式")
-    proxy_mode = (WebKit2.NetworkProxyMode.NO_PROXY if mode == "direct"
-                  else WebKit2.NetworkProxyMode.DEFAULT)
+    proxy_mode = WebKit2.NetworkProxyMode.DEFAULT
+    settings = None
+    if mode == "direct":
+        # An explicit empty proxy configuration also replaces an active route.
+        # NO_PROXY can leave a running session on its previous system proxy.
+        proxy_mode = WebKit2.NetworkProxyMode.CUSTOM
+        settings = WebKit2.NetworkProxySettings.new(None, ["*"])
     if hasattr(manager, "set_network_proxy_settings"):
-        manager.set_network_proxy_settings(proxy_mode, None)
+        manager.set_network_proxy_settings(proxy_mode, settings)
     else:
         # WebKitGTK 2.28/2.30 expose this setting on the context instead.
-        context.set_network_proxy_settings(proxy_mode, None)
+        context.set_network_proxy_settings(proxy_mode, settings)
 
 
 def supported_uri(uri):
