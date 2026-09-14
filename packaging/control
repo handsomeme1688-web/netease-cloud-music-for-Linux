@@ -1,0 +1,12 @@
+Package: netease-cloud-music-webkit
+Version: 1.0.0
+Section: sound
+Priority: optional
+Architecture: all
+Maintainer: handsomeme1688-web <hamburgeryummy614@gmail.com>
+Depends: python3, python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1, gstreamer1.0-plugins-good, gstreamer1.0-libav
+Homepage: https://music.163.com/st/webplayer
+Description: Standalone WebKitGTK desktop wrapper for NetEase Cloud Music
+ A small unofficial Ubuntu desktop application that opens the NetEase
+ Cloud Music web player in an isolated WebKitGTK window. It does not use
+ Google Chrome, Chromium, or Electron. An Internet connection is required.

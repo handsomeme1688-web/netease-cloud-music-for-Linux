@@ -1,0 +1,15 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=网易云音乐
+Name[zh_CN]=网易云音乐
+GenericName=Music Player
+GenericName[zh_CN]=音乐播放器
+Comment=独立 WebKitGTK 网易云音乐网页播放器
+Exec=netease-cloud-music
+Icon=netease-cloud-music
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+StartupNotify=true
+StartupWMClass=io.github.neteasecloudmusic.WebPlayer
+SingleMainWindow=true
