@@ -12,7 +12,7 @@
 在 Ubuntu 桌面打开终端，切换到安装包所在目录后运行：
 
 ```sh
-sudo apt install ./netease-cloud-music-webkit_1.0.0_all.deb
+sudo apt install ./netease-cloud-music-webkit_1.0.1_all.deb
 ```
 
 APT 会安装所需系统依赖。安装完成后，在应用菜单中搜索“网易云音乐”，或在终端执行：
@@ -63,6 +63,26 @@ Wayland 桌面下，应用优先使用原生 Wayland，连接不可用时自动�
 
 如需排查旧驱动兼容性，先退出应用，再用 `NETEASE_MUSIC_BACKEND=x11 netease-cloud-music` 临时选择 X11；也可用 `NETEASE_MUSIC_BACKEND=wayland` 强制原生 Wayland。已经运行的实例须退出后才会使用新的显示后端。
 
+## Ubuntu 22.04 与启动排查
+
+最低运行依赖为 Python 3.10、WebKitGTK 2.36。v1.0.1 为 WebKitGTK 2.36–2.38 补充了旧版 JavaScript 接口和网页响应处理兼容，避免在创建窗口时调用不存在的方法。
+
+v1.0.1 同时修正了首页被当成下载文件的处理：对返回 HTML 的播放器首页明确执行页面显示；对非网页内容、空响应或 HTTP 错误显示具体状态、WebKit 内容类型和原始响应头，不再弹出保存 `webplayer` 的对话框。正常重定向和其他地址的下载仍由各自流程处理。
+
+如果窗口出现但网页全白，先完全退出应用，再在终端检查运行版本：
+
+```sh
+netease-cloud-music --check
+```
+
+若怀疑是显卡渲染兼容问题，可临时尝试：
+
+```sh
+WEBKIT_DISABLE_DMABUF_RENDERER=1 netease-cloud-music
+```
+
+这是 WebKitGTK 提供的渲染排查选项，仅影响此次启动；不同版本和显卡的效果可能不同。应用采用单实例运行，已有窗口必须先关闭，重新运行命令才能让新的环境设置生效。若仍然白屏，请提供 `--check` 输出及完全退出后重新启动时的终端错误。
+
 ## 卸载
 
 若使用 .deb 安装：
@@ -92,6 +112,12 @@ bash uninstall.sh --purge
 bash build-package.sh /绝对路径/outputs
 ```
 
-生成 `netease-cloud-music-webkit_1.0.0_all.deb` 和 `netease-cloud-music-1.0.0-source.tar.gz`。
+生成 `netease-cloud-music-webkit_1.0.1_all.deb` 和 `netease-cloud-music-1.0.1-source.tar.gz`。
 未提供输出目录时，使用源码目录下的 `dist`。
+在已安装运行依赖的环境中，可运行兼容性回归测试（无需打开窗口）：
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
 图标的原始品牌图像来自[网易云音乐官网提供的高清标识](https://p3.music.126.net/9z9CeujRSPOPm7Rq2DFw_g==/6674035581283071.jpg)，在 SVG 中采用参考 macOS 的连续圆角裁剪、透明留白与轻微阴影，以适配桌面图标的显示。本软件仍是非官方网页封装。

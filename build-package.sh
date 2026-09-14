@@ -4,7 +4,7 @@ umask 022
 
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 output_dir=${1:-"$source_dir/dist"}
-version=1.0.0
+version=1.0.1
 package_name=netease-cloud-music-webkit
 
 for command in dpkg-deb tar install python3; do
@@ -45,7 +45,9 @@ archive_root="$build_dir/netease-cloud-music-$version"
 install -d "$archive_root"
 cp -R -- "$source_dir/app.py" "$source_dir/assets" "$source_dir/packaging" \
   "$source_dir/build-package.sh" "$source_dir/install.sh" \
-  "$source_dir/uninstall.sh" "$source_dir/README.md" "$archive_root/"
+  "$source_dir/uninstall.sh" "$source_dir/README.md" "$source_dir/.gitignore" "$archive_root/"
+install -d "$archive_root/tests"
+install -m 0644 "$source_dir/tests/"*.py "$archive_root/tests/"
 tar -C "$build_dir" --owner=0 --group=0 -czf \
   "$output_dir/netease-cloud-music-${version}-source.tar.gz" "netease-cloud-music-$version"
 printf '已生成安装包：%s\n已生成源码包：%s\n' \

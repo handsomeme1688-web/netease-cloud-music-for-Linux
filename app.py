@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 
@@ -54,6 +54,28 @@ def supported_uri(uri):
         return parsed.scheme in ("https", "http") and bool(parsed.hostname)
     except ValueError:
         return False
+
+
+def is_player_uri(uri):
+    try:
+        parsed = urlsplit(uri or "")
+        return (parsed.scheme == "https" and parsed.hostname == "music.163.com"
+                and parsed.path.rstrip("/") == "/st/webplayer")
+    except ValueError:
+        return False
+
+
+def page_response_error(response):
+    status = response.get_status_code()
+    mime = response.get_mime_type() or "未知"
+    headers = response.get_http_headers()
+    declared_type = headers.get_one("Content-Type") if headers else None
+    disposition = headers.get_one("Content-Disposition") if headers else None
+    return ("播放器首页没有返回可显示的网页。\n"
+            f"HTTP 状态：{status}；WebKit 内容类型：{mime}\n"
+            f"Content-Type：{declared_type or '未提供'}\n"
+            f"Content-Disposition：{disposition or '未提供'}\n"
+            "请稍后重试；若持续出现，请提供以上响应信息。")
 
 
 class MusicApplication(Gtk.Application):
@@ -119,6 +141,16 @@ class MusicApplication(Gtk.Application):
 
     def choose_download(self, download, suggested_name):
         parent = self.get_active_window()
+        # The player entry page is a document, never an installation download.
+        # Keep an unexpected response visible instead of saving a 'webplayer' file.
+        response = download.get_response()
+        if response and is_player_uri(response.get_uri()):
+            download.cancel()
+            view = download.get_web_view()
+            window = view.get_toplevel() if view else self.main_window
+            if isinstance(window, MusicWindow):
+                window.show_error(page_response_error(response))
+            return True
         chooser = Gtk.FileChooserDialog(title="保存文件", transient_for=parent,
                                        action=Gtk.FileChooserAction.SAVE)
         chooser.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.ACCEPT)
@@ -317,15 +349,25 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.position_window_controls()
 
     def position_window_controls(self):
-        self.webview.evaluate_javascript(
+        script = (
             "(() => { const nav = document.getElementById('page_pc_main_nav'); "
             "if (!nav) return 35; const r = nav.getBoundingClientRect(); "
-            "return r.top + r.height / 2; })()",
-            -1, None, None, None, self.control_position_ready, None)
+            "return r.top + r.height / 2; })()")
+        # Ubuntu 22.04 can provide WebKitGTK 2.36, before the 2.40 API.
+        # Both paths run the same layout query and keep the native controls.
+        if hasattr(self.webview, "evaluate_javascript"):
+            self.webview.evaluate_javascript(
+                script, -1, None, None, None, self.control_position_ready, False)
+        else:
+            self.webview.run_javascript(script, None, self.control_position_ready, True)
 
-    def control_position_ready(self, view, task, _data):
+    def control_position_ready(self, view, task, legacy_api):
         try:
-            center = view.evaluate_javascript_finish(task).to_double()
+            if legacy_api:
+                value = view.run_javascript_finish(task).get_js_value()
+            else:
+                value = view.evaluate_javascript_finish(task)
+            center = value.to_double()
             if self.get_window() and 0 < center < 160:
                 margin = round(center * view.get_zoom_level() - 13)
                 self.window_controls.set_margin_top(max(6, min(120, margin)))
@@ -414,7 +456,7 @@ class MusicWindow(Gtk.ApplicationWindow):
     def load_failed(self, _view, _event, _uri, error):
         if error.matches(WebKit2.network_error_quark(), WebKit2.NetworkError.CANCELLED):
             return False
-        if error.domain == "WebKitPolicyError":
+        if error.matches(WebKit2.policy_error_quark(), WebKit2.PolicyError.FRAME_LOAD_INTERRUPTED_BY_POLICY_CHANGE):
             return False
         self.show_error("页面暂时无法打开，请检查网络后重试。\n" + error.message)
         return True
@@ -436,7 +478,26 @@ class MusicWindow(Gtk.ApplicationWindow):
             if action.is_user_gesture():
                 self.message("此链接需要其他客户端", "请继续使用网页中的播放或登录入口。")
             return True
-        if kind == WebKit2.PolicyDecisionType.RESPONSE and not decision.is_mime_type_supported():
+        if kind == WebKit2.PolicyDecisionType.RESPONSE:
+            response = decision.get_response()
+            if is_player_uri(response.get_uri()):
+                if 300 <= response.get_status_code() < 400:
+                    return False
+                if (response.get_mime_type() in ("text/html", "application/xhtml+xml")
+                        and 200 <= response.get_status_code() < 300):
+                    # Render the entry document even if a server or proxy adds
+                    # Content-Disposition: attachment to an HTML response.
+                    decision.use()
+                else:
+                    decision.ignore()
+                    self.show_error(page_response_error(response))
+                return True
+            if decision.is_mime_type_supported():
+                return False
+            # WebKitGTK before 2.40 does not expose the main-resource check.
+            # Leave its default handling in place instead of guessing from URI.
+            if not hasattr(decision, "is_main_frame_main_resource"):
+                return False
             if decision.is_main_frame_main_resource():
                 decision.download()
                 return True
@@ -483,8 +544,12 @@ def main():
     parser.add_argument("--check", action="store_true", help="检查运行依赖，不打开窗口")
     args = parser.parse_args()
     if args.check:
-        print(f"GTK {Gtk.MAJOR_VERSION}.{Gtk.MINOR_VERSION}; "
+        print(f"应用 {VERSION}; Python {sys.version.split()[0]}; "
+              f"GTK {Gtk.MAJOR_VERSION}.{Gtk.MINOR_VERSION}.{Gtk.MICRO_VERSION}; "
               f"WebKitGTK {WebKit2.get_major_version()}.{WebKit2.get_minor_version()}.{WebKit2.get_micro_version()}")
+        api = "evaluate_javascript" if hasattr(WebKit2.WebView, "evaluate_javascript") else "run_javascript"
+        print(f"JavaScript 接口：{api}; 桌面会话：{os.environ.get('XDG_SESSION_TYPE', '未设置')}; "
+              f"显示后端：{os.environ.get('GDK_BACKEND', '自动')}")
         return 0
     os.umask(0o077)
     app = MusicApplication()
