@@ -23,6 +23,7 @@ netease-cloud-music
 
 此包面向满足下列依赖的 Debian、Ubuntu 及其衍生发行版。
 `all` 表示本应用使用 Python 源码，不包含绑定 CPU 架构的二进制；WebKitGTK 等系统依赖仍须支持你的系统架构。
+`.deb` 显式使用 gzip 压缩，以便这些发行版中的旧版 dpkg 也能解包。
 运行需要已有的 X11 或 Wayland 图形桌面、会话 D-Bus、可用的音频输出和互联网连接。
 
 ## 运行依赖
@@ -83,7 +84,7 @@ sudo apt install gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
 
 | 发行版 | 默认 Python 3 | GTK 3 | 官方源中的 WebKitGTK 接口与安装路线 |
 | --- | --- | --- | --- |
-| Debian 11 Bullseye | [3.9](https://packages.debian.org/bullseye/python3) | [3.24](https://packages.debian.org/bullseye/gir1.2-gtk-3.0) | 使用 [4.0](https://packages.debian.org/bullseye/gir1.2-webkit2-4.0) |
+| Debian 11 Bullseye | [3.9](https://packages.debian.org/bullseye/python3) | [3.24](https://packages.debian.org/bullseye/gir1.2-gtk-3.0) | 使用 [4.0](https://packages.debian.org/bullseye/gir1.2-webkit2-4.0)；需要可用的历史仓库，见下文 |
 | Debian 12 Bookworm | [3.11](https://packages.debian.org/bookworm/python3) | [3.24](https://packages.debian.org/bookworm/gir1.2-gtk-3.0) | 优先 [4.1](https://packages.debian.org/bookworm/gir1.2-webkit2-4.1)，也提供 [4.0](https://packages.debian.org/bookworm/gir1.2-webkit2-4.0) |
 | Debian 13 Trixie | [3.13](https://packages.debian.org/trixie/python3) | [3.24](https://packages.debian.org/trixie/gir1.2-gtk-3.0) | 使用 [4.1](https://packages.debian.org/trixie/gir1.2-webkit2-4.1) |
 | Ubuntu 20.04 LTS Focal | [3.8](https://ubuntu.com/developers/docs/reference/availability/python/) | [3.24](https://lists.ubuntu.com/archives/focal-changes/2024-July/048677.html) | 使用 4.0；见官方 [Focal 软件包记录](https://lists.ubuntu.com/archives/ubuntu-studio-devel/2020-July/009373.html)与 [WebKitGTK 更新记录](https://lists.ubuntu.com/archives/focal-changes/2022-November/037110.html) |
@@ -92,6 +93,8 @@ sudo apt install gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
 | Ubuntu 26.04 LTS Resolute | [3.14](https://packages.ubuntu.com/en/resolute/python3) | [3.24](https://packages.ubuntu.com/source/resolute/gtk%2B3.0) | 使用 [4.1](https://packages.ubuntu.com/resolute/gir1.2-webkit2-4.1) |
 
 表中的 Python/GTK 版本为主、次版本，补丁版本会随更新变化。旧发行版需保持其官方更新源可用；Ubuntu 部分依赖位于 universe，应先启用该组件并刷新软件包索引。其他 Debian 系发行版可按其基础版本和自身软件源选择 4.1 或 4.0，不能仅凭“基于 Debian”保证可运行。
+
+Debian 11 已于 **2026-08-31 结束 LTS**，详见 [Debian 官方公告](https://www.debian.org/News/2026/20260831)。其安全更新索引引用的部分包已不在官方 security pool 中，可能出现下载 404，见 [Debian 问题记录](https://bugs.debian.org/1147150)。自动检查仅在临时容器中使用官方 `20260831T235959Z` 安全更新快照，保留签名验证，并按 [Debian Snapshot 官方文档](https://snapshot.debian.org/)只对该快照关闭有效期检查。用户安装脚本不会自动修改软件源；使用 Debian 11 前需确认自己的仓库能够提供完整依赖，上表中的历史包记录不代表默认源仍可完成安装。
 
 可先检查本机仓库提供的候选版本：
 
@@ -202,7 +205,7 @@ bash uninstall.sh --purge
 
 ## 从源码构建
 
-构建工具为 `bash`、`coreutils`、`dpkg`（提供 `dpkg-deb`）、`tar`、`gzip` 和 `python3`。其中 `coreutils` 提供复制、创建目录、计算体积和临时目录等命令；`gzip` 用于源码压缩包。安装构建工具：
+构建工具为 `bash`、`coreutils`、`dpkg`（提供 `dpkg-deb`）、`tar`、`gzip` 和 `python3`。其中 `coreutils` 提供复制、创建目录、计算体积和临时目录等命令；构建脚本通过 `dpkg-deb -Zgzip` 显式使用 gzip 压缩 `.deb`，源码包也使用 gzip。安装构建工具：
 
 ```sh
 sudo apt install bash coreutils dpkg tar gzip python3
@@ -222,6 +225,6 @@ bash build-package.sh ./dist
 python3 -m unittest discover -s tests -v
 ```
 
-仓库提供七种发行版的 [自动兼容性检查](https://github.com/handsomeme1688-web/netease-cloud-music-webkit/actions/workflows/compatibility.yml)，验证 `.deb` 依赖安装、运行库加载、SVG 图标、音频插件和回归测试。容器检查不包含真实显卡、桌面会话、账号登录或在线音乐播放。
+仓库的 [自动兼容性检查](https://github.com/handsomeme1688-web/netease-cloud-music-webkit/actions/workflows/compatibility.yml)先在 Ubuntu 26.04 构建一个 `.deb`，再让表中的七种系统安装同一产物，检查依赖、运行库、图标、音频插件及回归测试，最新结果见链接。容器检查不包含真实显卡、桌面会话、账号登录或在线音乐播放；实际图形运行验证仍仅限 Ubuntu 26.04。
 
 图标的原始品牌图像来自[网易云音乐官网提供的高清标识](https://p3.music.126.net/9z9CeujRSPOPm7Rq2DFw_g==/6674035581283071.jpg)，在 SVG 中采用参考 macOS 的连续圆角裁剪、透明留白与轻微阴影，以适配桌面图标的显示。本软件仍是非官方网页封装。

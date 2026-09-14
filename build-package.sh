@@ -39,7 +39,7 @@ installed_size=$(du -sk -- "$stage/usr" | cut -f1)
 printf 'Installed-Size: %s\n' "$installed_size" >> "$stage/DEBIAN/control"
 
 deb_path="$output_dir/${package_name}_${version}_all.deb"
-dpkg-deb --root-owner-group --build "$stage" "$deb_path"
+dpkg-deb -Zgzip --root-owner-group --build "$stage" "$deb_path"
 
 archive_root="$build_dir/netease-cloud-music-$version"
 install -d "$archive_root"
