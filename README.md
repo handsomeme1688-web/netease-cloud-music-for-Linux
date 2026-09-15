@@ -4,6 +4,10 @@
 使用 Python 3、GTK 3 和 WebKitGTK，优先加载 4.1 接口，旧系统可回退到 4.0 接口，不需要安装或借用 Chrome、Chromium、Electron。
 它拥有独立窗口、应用菜单入口和独立的网页登录数据；仍需联网访问网易云音乐网页。
 这是非官方网页封装客户端，界面、账号登录、曲库、会员权限及播放能力由原网站提供。
+<img width="3071" height="1920" alt="image" src="https://github.com/user-attachments/assets/bf0294ce-c797-4481-bb77-7bd2d0f6851f" />
+<img width="3071" height="1909" alt="image" src="https://github.com/user-attachments/assets/0eba2233-aef8-4d3c-a30f-478388dec809" />
+请点击右上角的“登陆”按钮扫码登陆，登录后软件会自动跳转到下面的界面。如果没有跳转，请关闭软件重新打开即可。
+<img width="3072" height="1917" alt="image" src="https://github.com/user-attachments/assets/598fc2d5-7a3a-4007-83ce-21f54234a8db" />
 
 ## 安装 .deb 包
 
