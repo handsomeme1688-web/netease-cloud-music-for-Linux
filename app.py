@@ -2,16 +2,18 @@
 """An independent GTK/WebKitGTK window for NetEase Cloud Music."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
+import weakref
 from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 
@@ -140,6 +142,35 @@ def is_player_uri(uri):
         return False
 
 
+def is_music_uri(uri):
+    try:
+        parsed = urlsplit(uri or "")
+        return parsed.scheme == "https" and parsed.hostname == "music.163.com"
+    except ValueError:
+        return False
+
+
+def is_login_uri(uri):
+    if not is_music_uri(uri):
+        return False
+    try:
+        parsed = urlsplit(uri)
+        routes = (parsed.path, urlsplit(parsed.fragment).path)
+        return any(route.rstrip("/") == "/login" for route in routes)
+    except ValueError:
+        return False
+
+
+def login_cookie_fingerprint(cookies):
+    # Keep only an in-memory digest to distinguish a new login from routine
+    # cookie updates, including replacement of a stale authentication cookie.
+    values = sorted(cookie.get_value() for cookie in cookies
+                    if cookie.get_name() == "MUSIC_U" and cookie.get_value())
+    if not values:
+        return b""
+    return hashlib.sha256(json.dumps(values).encode("utf-8")).digest()
+
+
 def page_response_error(response):
     status = response.get_status_code()
     mime = response.get_mime_type() or "未知"
@@ -183,6 +214,7 @@ class MusicApplication(Gtk.Application):
         self.proxy_mode = read_proxy_mode()
         apply_proxy_mode(self.manager, self.context, self.proxy_mode)
         self.context.connect("download-started", self.on_download)
+        self.start_login_watch()
         icon = Path(__file__).resolve().parent / "assets" / "netease-cloud-music.svg"
         Gtk.IconTheme.get_default().append_search_path(str(icon.parent))
         if icon.exists():
@@ -202,13 +234,120 @@ class MusicApplication(Gtk.Application):
         if self.main_window is None:
             self.main_window = MusicWindow(self)
             self.main_window.connect("destroy", self.on_main_destroy)
+            self.watch_login_window(self.main_window)
             self.main_window.webview.load_uri(HOME_URL)
         self.main_window.present()
 
     def do_shutdown(self):
+        self.stop_login_watch()
         if self.main_window:
             self.save_state(self.main_window)
         Gtk.Application.do_shutdown(self)
+
+    def start_login_watch(self):
+        self._login_windows = weakref.WeakSet()
+        self._login_fingerprint = None
+        self._login_read_pending = False
+        self._login_read_again = False
+        self._login_return_timer = 0
+        self._login_document_serial = 0
+        self._login_watch_active = True
+        self._login_cancellable = Gio.Cancellable()
+        self._login_cookie_manager = self.manager.get_cookie_manager()
+        self._login_cookie_signal = self._login_cookie_manager.connect(
+            "changed", self.check_login_cookies)
+        self.check_login_cookies()
+
+    def stop_login_watch(self):
+        if not getattr(self, "_login_watch_active", False):
+            return
+        self._login_watch_active = False
+        self._login_cookie_manager.disconnect(self._login_cookie_signal)
+        self._login_cancellable.cancel()
+        if self._login_return_timer:
+            GLib.source_remove(self._login_return_timer)
+            self._login_return_timer = 0
+        self._login_windows.clear()
+
+    def watch_login_window(self, window):
+        window.webview.connect("notify::uri", self.login_uri_changed, window)
+        window.webview.connect("load-changed", self.login_document_changed, window)
+        self.login_uri_changed(window.webview, None, window)
+
+    def login_document_changed(self, _view, event, window):
+        if (self._login_watch_active and window is self.main_window
+                and event == WebKit2.LoadEvent.COMMITTED):
+            self._login_document_serial += 1
+
+    def login_uri_changed(self, view, _spec, window):
+        if not self._login_watch_active:
+            return
+        uri = view.get_uri()
+        if is_login_uri(uri):
+            self._login_windows.add(window)
+            self.check_login_cookies()
+        elif ((is_player_uri(uri) and window is self.main_window)
+              or (uri and not is_music_uri(uri))):
+            self._login_windows.discard(window)
+
+    def check_login_cookies(self, *_):
+        if not self._login_watch_active:
+            return
+        if self._login_read_pending:
+            self._login_read_again = True
+            return
+        self._login_read_pending = True
+        self._login_cookie_manager.get_cookies(
+            HOME_URL, self._login_cancellable, self.login_cookies_ready, None)
+
+    def login_cookies_ready(self, manager, result, _data):
+        self._login_read_pending = False
+        try:
+            cookies = manager.get_cookies_finish(result) or []
+        except GLib.Error:
+            cookies = None
+        if not self._login_watch_active:
+            return
+        if cookies is not None:
+            previous = self._login_fingerprint
+            self._login_fingerprint = login_cookie_fingerprint(cookies)
+            if (previous is not None and self._login_fingerprint
+                    and previous != self._login_fingerprint and self._login_windows):
+                if self._login_return_timer:
+                    GLib.source_remove(self._login_return_timer)
+                self._login_return_timer = GLib.timeout_add(
+                    600, self.return_after_login, self._login_fingerprint,
+                    self._login_document_serial)
+        if self._login_read_again:
+            self._login_read_again = False
+            self.check_login_cookies()
+
+    def return_after_login(self, fingerprint, document_serial):
+        self._login_return_timer = 0
+        if not self._login_watch_active or fingerprint != self._login_fingerprint:
+            return False
+        windows = self.get_windows()
+        login_windows = [window for window in self._login_windows
+                         if window in windows and is_music_uri(window.webview.get_uri())]
+        # Consume the transition before navigating. A rejected/stale session
+        # must not cause a loop between the player and the login page.
+        self._login_windows.clear()
+        main = self.main_window
+        if not login_windows or main is None or main not in windows:
+            return False
+        if not is_music_uri(main.webview.get_uri()):
+            return False
+        # A popup can finish while the player still shows its old account state.
+        # Refresh that document once, unless the site has already replaced it.
+        popup_login = any(window is not main for window in login_windows)
+        if (not is_player_uri(main.webview.get_uri()) or is_login_uri(main.webview.get_uri())
+                or (popup_login and document_serial == self._login_document_serial)):
+            main.webview.load_uri(HOME_URL)
+        for window in login_windows:
+            if window is not main:
+                window.destroy()
+        main.present()
+        return False
 
     def on_main_destroy(self, *_):
         self.main_window = None
@@ -367,6 +506,7 @@ class MusicWindow(Gtk.ApplicationWindow):
         error_box.pack_start(self.network_button, False, False, 0)
         self.stack.add_named(error_box, "error")
         self.create_window_controls()
+        self.create_window_interaction()
         self.header_style = None
         self.webview.connect("notify::zoom-level", self.sync_page_controls)
         self.sync_page_controls()
@@ -375,6 +515,7 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.connect("delete-event", self.before_close)
         self.connect("window-state-event", self.window_state_changed)
         self.show_all()
+        self.update_window_interaction()
 
     def update_network_button(self):
         self.network_button.set_label("使用直连并记住" if self.app.proxy_mode == "system"
@@ -437,6 +578,90 @@ class MusicWindow(Gtk.ApplicationWindow):
             self.window_controls.pack_start(button, False, False, 0)
             self.control_buttons[name] = button
         self.overlay.add_overlay(self.window_controls)
+
+    def create_window_interaction(self):
+        # A borderless window still needs native movement and resize grips.
+        # Only these narrow strips receive input; the navigation row stays live.
+        self.resize_handles = []
+        edges = [
+            (Gdk.WindowEdge.NORTH, "n-resize", Gtk.Align.FILL, Gtk.Align.START, 6, 0),
+            (Gdk.WindowEdge.SOUTH, "s-resize", Gtk.Align.FILL, Gtk.Align.END, 6, 0),
+            (Gdk.WindowEdge.WEST, "w-resize", Gtk.Align.START, Gtk.Align.FILL, 0, 6),
+            (Gdk.WindowEdge.EAST, "e-resize", Gtk.Align.END, Gtk.Align.FILL, 0, 6),
+            (Gdk.WindowEdge.NORTH_WEST, "nw-resize", Gtk.Align.START, Gtk.Align.START, 12, 12),
+            (Gdk.WindowEdge.NORTH_EAST, "ne-resize", Gtk.Align.END, Gtk.Align.START, 12, 12),
+            (Gdk.WindowEdge.SOUTH_WEST, "sw-resize", Gtk.Align.START, Gtk.Align.END, 12, 12),
+            (Gdk.WindowEdge.SOUTH_EAST, "se-resize", Gtk.Align.END, Gtk.Align.END, 12, 12),
+        ]
+        for edge, cursor, horizontal, vertical, height, width in edges:
+            handle = self.create_input_grip(cursor)
+            handle.set_halign(horizontal)
+            handle.set_valign(vertical)
+            handle.set_size_request(width, height)
+            if horizontal == Gtk.Align.FILL:
+                handle.set_margin_start(12)
+                handle.set_margin_end(12)
+            if vertical == Gtk.Align.FILL:
+                handle.set_margin_top(12)
+                handle.set_margin_bottom(12)
+            handle.connect("button-press-event", self.resize_pressed, edge)
+            self.overlay.add_overlay(handle)
+            self.resize_handles.append(handle)
+
+        self.drag_handle = self.create_input_grip("grab")
+        self.drag_handle.set_halign(Gtk.Align.FILL)
+        self.drag_handle.set_valign(Gtk.Align.START)
+        self.drag_handle.set_margin_start(12)
+        self.drag_handle.set_margin_end(144)
+        self.drag_handle.set_margin_top(6)
+        self.drag_handle.set_size_request(0, 12)
+        self.drag_handle.set_tooltip_text("拖动窗口；双击最大化或还原")
+        self.drag_handle.connect("button-press-event", self.move_pressed)
+        self.overlay.add_overlay(self.drag_handle)
+
+    def create_input_grip(self, cursor_name):
+        grip = Gtk.EventBox()
+        grip.set_visible_window(False)
+        grip.set_above_child(True)
+        grip.set_no_show_all(True)
+        grip.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.ENTER_NOTIFY_MASK)
+        # The event belongs to the input-only grip window, not to the WebView.
+        def enter(widget, event):
+            event.window.set_cursor(Gdk.Cursor.new_from_name(widget.get_display(), cursor_name))
+            return False
+        grip.connect("enter-notify-event", enter)
+        return grip
+
+    def update_window_interaction(self, state=None):
+        if state is None:
+            window = self.get_window()
+            state = window.get_state() if window else 0
+        fullscreen = bool(state & Gdk.WindowState.FULLSCREEN)
+        resizable = self.get_resizable() and not state & (
+            Gdk.WindowState.MAXIMIZED | Gdk.WindowState.FULLSCREEN)
+        for handle in self.resize_handles:
+            handle.set_visible(bool(resizable))
+        self.drag_handle.set_visible(not fullscreen)
+
+    def move_pressed(self, _grip, event):
+        if event.button != 1:
+            return False
+        if event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
+            self.toggle_maximize()
+            return True
+        if event.type != Gdk.EventType.BUTTON_PRESS:
+            return False
+        self.begin_move_drag(event.button, int(event.x_root), int(event.y_root), event.time)
+        return True
+
+    def resize_pressed(self, _grip, event, edge):
+        window = self.get_window()
+        if (event.button != 1 or event.type != Gdk.EventType.BUTTON_PRESS
+                or not self.get_resizable() or not window
+                or window.get_state() & (Gdk.WindowState.MAXIMIZED | Gdk.WindowState.FULLSCREEN)):
+            return False
+        self.begin_resize_drag(edge, event.button, int(event.x_root), int(event.y_root), event.time)
+        return True
 
     def sync_page_controls(self, *_):
         # Reserve space only in NetEase's real navigation row, not in the page
@@ -502,6 +727,8 @@ class MusicWindow(Gtk.ApplicationWindow):
             button.get_accessible().set_name(label)
         if event.changed_mask & Gdk.WindowState.FULLSCREEN:
             self.window_controls.set_visible(not event.new_window_state & Gdk.WindowState.FULLSCREEN)
+        if event.changed_mask & (Gdk.WindowState.MAXIMIZED | Gdk.WindowState.FULLSCREEN):
+            self.update_window_interaction(event.new_window_state)
         return False
 
     def configure(self, _window, event):
@@ -614,6 +841,7 @@ class MusicWindow(Gtk.ApplicationWindow):
 
     def create_popup(self, view, _action):
         popup = MusicWindow(self.app, related_view=view)
+        self.app.watch_login_window(popup)
         popup.set_transient_for(self)
         return popup.webview
 
@@ -624,6 +852,7 @@ class MusicWindow(Gtk.ApplicationWindow):
     def enter_fullscreen(self, *_):
         self.fullscreen()
         self.window_controls.hide()
+        self.update_window_interaction(Gdk.WindowState.FULLSCREEN)
         return True
 
     def leave_fullscreen(self, *_):
