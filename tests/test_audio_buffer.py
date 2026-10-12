@@ -37,6 +37,8 @@ class AudioBufferTests(unittest.TestCase):
 
     def test_direct_mode_uses_explicit_direct_proxy_resolver(self):
         self.assertIsInstance(self.buffer.session.props.proxy_resolver, app.Gio.SimpleProxyResolver)
+        self.assertEqual(self.buffer.session.props.proxy_resolver.lookup(
+            'https://m10.music.126.net/fixture.mp3', None), ['direct://'])
 
     def test_cancel_invalidates_late_callbacks(self):
         job = self.job()
