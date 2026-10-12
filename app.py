@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 
@@ -54,6 +54,7 @@ except (ImportError, ValueError) as exc:
     sys.exit(1)
 
 from media_service import MediaService
+from audio_buffer import AudioBuffer, delivery_script
 
 if (Gtk.MAJOR_VERSION, Gtk.MINOR_VERSION) < (3, 24):
     print("需要 GTK 3.24 或更新的 GTK 3 版本。", file=sys.stderr)
@@ -513,6 +514,18 @@ class MusicWindow(Gtk.ApplicationWindow):
                 WebKit2.UserContentInjectedFrames.TOP_FRAME,
                 WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/*"], None))
             manager = self.webview.get_user_content_manager()
+            self.audio_buffer = AudioBuffer(WEBKIT_API, app.proxy_mode, self.deliver_native_audio)
+            self.connect("destroy", lambda *_: self.audio_buffer.cancel_all())
+            manager.register_script_message_handler("nativeAudio")
+            manager.connect("script-message-received::nativeAudio", self.native_audio_message)
+            native_script = Path(__file__).resolve().parent / "assets" / "native-audio.js"
+            manager.add_script(WebKit2.UserScript.new(
+                native_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/st/webplayer*"], None))
+            buffer_script = Path(__file__).resolve().parent / "assets" / "buffered-playback.js"
+            manager.add_script(WebKit2.UserScript.new(
+                buffer_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/st/webplayer*"], None))
             manager.register_script_message_handler("playbackRecovery")
             manager.connect("script-message-received::playbackRecovery", self.playback_recovery_message)
             script = Path(__file__).resolve().parent / "assets" / "playback-recovery.js"
@@ -847,6 +860,8 @@ class MusicWindow(Gtk.ApplicationWindow):
 
     def load_changed(self, view, event):
         if event == WebKit2.LoadEvent.STARTED:
+            if hasattr(self, "audio_buffer"):
+                self.audio_buffer.cancel_all()
             if not self.is_popup:
                 self.get_application().system_media.reset()
             self.playback_notice.hide()
@@ -897,6 +912,40 @@ class MusicWindow(Gtk.ApplicationWindow):
             return
         self.get_application().system_media.update(message)
 
+    def native_audio_message(self, _manager, result):
+        if not self.get_window() or not is_player_uri(self.webview.get_uri()):
+            return
+        try:
+            value = result.get_js_value().to_string()
+            if len(value) > 12288:
+                return
+            message = json.loads(value)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(message, dict):
+            return
+        identifier = message.get("id")
+        if not isinstance(identifier, str):
+            return
+        if message.get("event") == "request":
+            self.audio_buffer.request(identifier, message.get("url"))
+        elif message.get("event") == "cancel":
+            self.audio_buffer.cancel(identifier)
+
+    def deliver_native_audio(self, identifier, event, data, continuation=None):
+        if not self.get_window() or not is_player_uri(self.webview.get_uri()):
+            self.audio_buffer.cancel(identifier)
+            return
+        def delivered(view, result, _):
+            try:
+                view.run_javascript_finish(result)
+            except GLib.Error:
+                self.audio_buffer.cancel(identifier)
+                return
+            if continuation:
+                continuation()
+        self.webview.run_javascript(delivery_script(identifier, event, data), None, delivered, None)
+
     def playback_recovery_message(self, _manager, result):
         if not self.get_window() or not is_player_uri(self.webview.get_uri()):
             return
@@ -927,6 +976,14 @@ class MusicWindow(Gtk.ApplicationWindow):
             ("/weapi/song/enhance/player/url", "/api/song/enhance/player/url"))
         if audio or player_api:
             resource.connect("failed", self.playback_resource_failed)
+        elif host.endswith(".music.126.net") and parsed.path.lower().endswith(".js"):
+            resource.connect("failed", self.page_component_failed)
+
+    def page_component_failed(self, _resource, error):
+        if (self.get_window() and is_player_uri(self.webview.get_uri())
+                and self.webview.is_loading()
+                and not error.matches(WebKit2.network_error_quark(), WebKit2.NetworkError.CANCELLED)):
+            self.show_error("播放器页面的组件加载失败，请点击“重新加载”恢复网页和网络会话。")
 
     def playback_resource_failed(self, _resource, error):
         # Seeking and changing tracks normally cancel earlier media requests.

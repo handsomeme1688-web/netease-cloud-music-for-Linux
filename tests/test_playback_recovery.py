@@ -164,6 +164,21 @@ class StalledPlaybackTests(unittest.TestCase):
 
 
 class PlaybackPolicyTests(unittest.TestCase):
+    def test_failed_startup_script_shows_retry_instead_of_blank_page(self):
+        window = SimpleNamespace(get_window=lambda: True,
+            webview=SimpleNamespace(get_uri=lambda: app.HOME_URL,is_loading=lambda: True),show_error=Mock())
+        error = SimpleNamespace(matches=lambda _domain,_code: False)
+        app.MusicWindow.page_component_failed(window,None,error)
+        window.show_error.assert_called_once()
+
+    def test_cancelled_or_background_script_does_not_interrupt_playback(self):
+        for loading,cancelled in ((True,True),(False,False)):
+            window = SimpleNamespace(get_window=lambda: True,
+                webview=SimpleNamespace(get_uri=lambda: app.HOME_URL,is_loading=lambda: loading),show_error=Mock())
+            error = SimpleNamespace(matches=lambda _domain,_code: cancelled)
+            app.MusicWindow.page_component_failed(window,None,error)
+            window.show_error.assert_not_called()
+
     @unittest.skipUnless(hasattr(app.WebKit2, 'WebsitePolicies'), 'Policies require WebKitGTK 2.30')
     def test_modern_webview_allows_asynchronous_music(self):
         context = object()

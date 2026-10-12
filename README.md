@@ -16,7 +16,7 @@
 在 Debian/Ubuntu 桌面打开终端，切换到安装包所在目录后运行：
 
 ```sh
-sudo apt install ./netease-cloud-music-webkit_1.0.5_all.deb
+sudo apt install ./netease-cloud-music-webkit_1.0.6_all.deb
 ```
 
 APT 会根据本机发行版和架构解析安装包声明的全部依赖，并选择仓库可用的 WebKitGTK 接口。安装完成后，在应用菜单中搜索“网易云音乐”，或在终端执行：
@@ -42,6 +42,7 @@ netease-cloud-music
 | `python3-gi`（≥ 3.36） | Python 调用 GTK、Gio 和 WebKitGTK 的绑定 |
 | `gir1.2-gtk-3.0`（≥ 3.24） | GTK 3、GDK 等图形接口 |
 | `gir1.2-webkit2-4.1`（≥ 2.36）或 `gir1.2-webkit2-4.0`（≥ 2.28） | 网页渲染接口；优先使用 4.1 |
+| `gir1.2-soup-3.0`（WebKit 4.1）或 `gir1.2-soup-2.4`（WebKit 4.0） | 原生音频连接；由对应 WebKit GI 包自动带入 |
 | `ca-certificates` | 验证 HTTPS 网站证书 |
 | `librsvg2-common` | 为 GdkPixbuf 提供 SVG 图标加载支持 |
 | `gstreamer1.0-plugins-base` | 基础音视频处理组件 |
@@ -161,6 +162,10 @@ v1.0.3 修复扫码登录后停留在旧版登录界面的问题：进入官方�
 
 ## 播放中断与恢复
 
+v1.0.6 在后台完整缓冲网易云音频，播放停滞时优先使用完整缓存继续播放和跳转，避免分段音频缓冲不再增长、恢复时卡在旧进度的问题。有完整缓存时，检测停滞的等待缩短为三秒。后台缓冲由应用内部的原生客户端取得相同的已授权音频地址，独立于网页的分段音频通道；仍使用本应用保存的代理模式和 HTTPS 证书验证。
+
+音频缓存仅在内存中保存，最多两首、总量最多 64 MiB；单首超出上限、获取完整音频失败或网络超时时，会回退到普通流式播放。后台缓冲不会延迟网页的播放请求。不会保存歌曲文件、改变网站会员或版权限制，也不会清除登录数据。
+
 v1.0.5 修正系统媒体卡片的应用名称和图标：显示“网易云音乐”及网易云图标，保留歌曲信息、封面与播放、暂停、上一首、下一首控制。桌面环境须支持 MPRIS，并能读取已安装的 `netease-cloud-music.desktop`。
 
 v1.0.4 修正了音乐页面的异步播放策略，让自动下一首及获取歌曲地址后的播放不再因为缺少即时鼠标手势而被拒绝。
@@ -270,7 +275,7 @@ sudo apt install bash coreutils dpkg tar gzip python3
 bash build-package.sh ./dist
 ```
 
-生成 `netease-cloud-music-webkit_1.0.5_all.deb` 和 `netease-cloud-music-1.0.5-source.tar.gz`。
+生成 `netease-cloud-music-webkit_1.0.6_all.deb` 和 `netease-cloud-music-1.0.6-source.tar.gz`。
 未提供输出目录时，使用源码目录下的 `dist`。
 在已安装运行依赖的环境中，可运行兼容性回归测试（无需打开窗口）：
 

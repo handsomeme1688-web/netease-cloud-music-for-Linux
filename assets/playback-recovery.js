@@ -165,7 +165,8 @@
                 state.progress = now;
                 continue;
             }
-            if (now - state.progress < (audio.seeking ? 30000 : 15000)) continue;
+            const buffered = window.__musicHasCompleteAudio && window.__musicHasCompleteAudio(audio);
+            if (now - state.progress < (buffered ? 3000 : (audio.seeking ? 30000 : 15000))) continue;
             if (state.retries >= 2) {
                 stop(audio, state);
                 notify("failed");
