@@ -11,12 +11,12 @@
 
 ## 安装 .deb 包
 
-从 [Releases 页面](https://github.com/handsomeme1688-web/netease-cloud-music-webkit/releases) 下载最新的 `.deb` 安装包。
+从 [Releases 页面](https://github.com/handsomeme1688-web/netease-cloud-music-for-Linux/releases) 下载最新的 `.deb` 安装包。
 
 在 Debian/Ubuntu 桌面打开终端，切换到安装包所在目录后运行：
 
 ```sh
-sudo apt install ./netease-cloud-music-webkit_1.0.3_all.deb
+sudo apt install ./netease-cloud-music-webkit_1.0.4_all.deb
 ```
 
 APT 会根据本机发行版和架构解析安装包声明的全部依赖，并选择仓库可用的 WebKitGTK 接口。安装完成后，在应用菜单中搜索“网易云音乐”，或在终端执行：
@@ -159,6 +159,16 @@ v1.0.3 修复扫码登录后停留在旧版登录界面的问题：进入官方�
 关闭窗口会停止播放。支持 Ctrl+R 刷新、Alt+方向键前进/后退、Ctrl++ / Ctrl+- 缩放和 Ctrl+Q 退出。
 已移除顶部工具栏与标题栏，网页直接从窗口顶边显示。最小化、最大化／还原、关闭三个原生按钮集成在内容区右上角，网易云顶栏右侧留出空间，避免遮挡账号和皮肤等入口。F10 不再恢复工具栏。Alt+Home 返回播放器首页，Alt+F4 关闭窗口。弹窗同样使用内部窗口按钮；视频全屏时暂时隐藏按钮，退出全屏后恢复。
 
+## 播放中断与恢复
+
+v1.0.4 修正了音乐页面的异步播放策略，让自动下一首及获取歌曲地址后的播放不再因为缺少即时鼠标手势而被拒绝。
+
+应用对已开始播放但进度长时间不再前进的音频进行恢复：一般等待 15 秒，正在跳转进度时等待 30 秒，再重新加载当前音频并尝试回到原进度。同一个音频地址最多自动重试两次；重试期间点击暂停会取消恢复。正在加载的音频只重试加载，不会自行启动已暂停的播放。
+
+如果仍然播放失败，页面会出现“播放连接异常”和“恢复播放器”按钮。也可以按 **Ctrl+Shift+R** 恢复。这个操作重新创建本应用的网页、音频和网络会话，可以处理 Ctrl+R 普通刷新仍然无效的状态，并保留登录 Cookie、网页数据、代理模式和窗口配置。恢复后请重新点击播放，播放队列是否恢复由原网页保存的数据决定。
+
+临时断网、歌曲地址失效、网站拒绝访问或本机音频故障仍可能影响播放；重试不改变网站的版权、会员及访问限制。
+
 ## 窗口显示
 
 右上角窗口按钮采用透明底和灰蓝细线图标，与网页顶栏保持接近的视觉风格；只有悬停时显示轻微反馈，关闭按钮悬停时变为网易云红色。
@@ -258,7 +268,7 @@ sudo apt install bash coreutils dpkg tar gzip python3
 bash build-package.sh ./dist
 ```
 
-生成 `netease-cloud-music-webkit_1.0.3_all.deb` 和 `netease-cloud-music-1.0.3-source.tar.gz`。
+生成 `netease-cloud-music-webkit_1.0.4_all.deb` 和 `netease-cloud-music-1.0.4-source.tar.gz`。
 未提供输出目录时，使用源码目录下的 `dist`。
 在已安装运行依赖的环境中，可运行兼容性回归测试（无需打开窗口）：
 
@@ -266,6 +276,6 @@ bash build-package.sh ./dist
 python3 -m unittest discover -s tests -v
 ```
 
-仓库的 [自动兼容性检查](https://github.com/handsomeme1688-web/netease-cloud-music-webkit/actions/workflows/compatibility.yml)先在 Ubuntu 26.04 构建一个 `.deb`，再让表中的七种系统安装同一产物，检查依赖、运行库、图标、音频插件及回归测试，最新结果见链接。容器检查不包含真实显卡、桌面会话、账号登录或在线音乐播放；实际图形运行验证仍仅限 Ubuntu 26.04。
+仓库的 [自动兼容性检查](https://github.com/handsomeme1688-web/netease-cloud-music-for-Linux/actions/workflows/compatibility.yml)先在 Ubuntu 26.04 构建一个 `.deb`，再让表中的七种系统安装同一产物，检查依赖、运行库、图标、音频插件及回归测试，最新结果见链接。容器检查不包含真实显卡、桌面会话、账号登录或在线音乐播放；实际图形运行验证仍仅限 Ubuntu 26.04。
 
 图标的原始品牌图像来自[网易云音乐官网提供的高清标识](https://p3.music.126.net/9z9CeujRSPOPm7Rq2DFw_g==/6674035581283071.jpg)，在 SVG 中采用参考 macOS 的连续圆角裁剪、透明留白与轻微阴影，以适配桌面图标的显示。本软件仍是非官方网页封装。

@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 
@@ -184,6 +184,15 @@ def page_response_error(response):
             "请稍后重试；若持续出现，请提供以上响应信息。")
 
 
+def create_webview(context, related_view=None):
+    properties = {"related_view": related_view} if related_view else {"web_context": context}
+    if hasattr(WebKit2, "WebsitePolicies"):
+        # Music continues across asynchronous URL requests and track changes.
+        properties["website_policies"] = WebKit2.WebsitePolicies(
+            autoplay=WebKit2.AutoplayPolicy.ALLOW)
+    return WebKit2.WebView(**properties)
+
+
 class MusicApplication(Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.FLAGS_NONE)
@@ -204,6 +213,20 @@ class MusicApplication(Gtk.Application):
                 self.state = saved
         except (OSError, ValueError):
             pass
+        self.create_web_context()
+        icon = Path(__file__).resolve().parent / "assets" / "netease-cloud-music.svg"
+        Gtk.IconTheme.get_default().append_search_path(str(icon.parent))
+        if icon.exists():
+            try:
+                Gtk.Window.set_default_icon_from_file(str(icon))
+            except GLib.Error as exc:
+                print(f"无法读取应用图标，请确认已安装 librsvg2-common：{exc.message}", file=sys.stderr)
+        self.add_action_callback("quit", lambda *_: self.quit())
+        self.set_accels_for_action("app.quit", ["<Primary>q"])
+        self.add_action_callback("recover", self.recover_player)
+        self.set_accels_for_action("app.recover", ["<Primary><Shift>r"])
+
+    def create_web_context(self):
         self.manager = WebKit2.WebsiteDataManager(
             base_data_directory=str(self.data_dir / "webkit"),
             base_cache_directory=str(self.cache_dir / "webkit"))
@@ -215,15 +238,26 @@ class MusicApplication(Gtk.Application):
         apply_proxy_mode(self.manager, self.context, self.proxy_mode)
         self.context.connect("download-started", self.on_download)
         self.start_login_watch()
-        icon = Path(__file__).resolve().parent / "assets" / "netease-cloud-music.svg"
-        Gtk.IconTheme.get_default().append_search_path(str(icon.parent))
-        if icon.exists():
-            try:
-                Gtk.Window.set_default_icon_from_file(str(icon))
-            except GLib.Error as exc:
-                print(f"无法读取应用图标，请确认已安装 librsvg2-common：{exc.message}", file=sys.stderr)
-        self.add_action_callback("quit", lambda *_: self.quit())
-        self.set_accels_for_action("app.quit", ["<Primary>q"])
+
+    def recover_player(self, *_):
+        if getattr(self, "_recovering_player", False) or self.main_window is None:
+            return
+        self._recovering_player = True
+        self.hold()
+        try:
+            self.save_state(self.main_window)
+            self.stop_login_watch()
+            # A page reload keeps the same network session and media process.
+            # Replace both while retaining their persistent data directories.
+            for window in list(self.get_windows()):
+                window.webview.stop_loading()
+                window.destroy()
+            self.main_window = None
+            self.create_web_context()
+            self.do_activate()
+        finally:
+            self._recovering_player = False
+            self.release()
 
     def add_action_callback(self, name, callback):
         action = Gio.SimpleAction.new(name, None)
@@ -301,13 +335,13 @@ class MusicApplication(Gtk.Application):
             HOME_URL, self._login_cancellable, self.login_cookies_ready, None)
 
     def login_cookies_ready(self, manager, result, _data):
-        self._login_read_pending = False
         try:
             cookies = manager.get_cookies_finish(result) or []
         except GLib.Error:
             cookies = None
-        if not self._login_watch_active:
+        if not self._login_watch_active or manager != self._login_cookie_manager:
             return
+        self._login_read_pending = False
         if cookies is not None:
             previous = self._login_fingerprint
             self._login_fingerprint = login_cookie_fingerprint(cookies)
@@ -426,10 +460,7 @@ class MusicWindow(Gtk.ApplicationWindow):
 
         self.set_decorated(False)
 
-        if related_view:
-            self.webview = WebKit2.WebView.new_with_related_view(related_view)
-        else:
-            self.webview = WebKit2.WebView.new_with_context(app.context)
+        self.webview = create_webview(app.context, related_view)
         settings = WebKit2.Settings()
         # The site only admits Firefox >=91 / Chrome >=84 via a UA regex.
         # Use its Firefox compatibility path; the actual engine stays WebKitGTK.
@@ -438,7 +469,7 @@ class MusicWindow(Gtk.ApplicationWindow):
         settings.set_enable_javascript(True)
         settings.set_enable_mediasource(True)
         settings.set_enable_webaudio(True)
-        settings.set_media_playback_requires_user_gesture(True)
+        settings.set_media_playback_requires_user_gesture(False)
         settings.set_javascript_can_open_windows_automatically(False)
         # NetEase calls this API unconditionally during React startup. WebKitGTK
         # 2.52 includes it as a feature that is disabled by default.
@@ -467,6 +498,13 @@ class MusicWindow(Gtk.ApplicationWindow):
                 }""",
                 WebKit2.UserContentInjectedFrames.TOP_FRAME,
                 WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/*"], None))
+            manager = self.webview.get_user_content_manager()
+            manager.register_script_message_handler("playbackRecovery")
+            manager.connect("script-message-received::playbackRecovery", self.playback_recovery_message)
+            script = Path(__file__).resolve().parent / "assets" / "playback-recovery.js"
+            manager.add_script(WebKit2.UserScript.new(
+                script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/st/webplayer*"], None))
         self.webview.set_zoom_level(number("zoom", 1.0, 0.5, 2.0))
         self.webview.connect("load-changed", self.load_changed)
         self.webview.connect("load-failed", self.load_failed)
@@ -479,6 +517,7 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.webview.connect("permission-request", self.permission_request)
         self.webview.connect("enter-fullscreen", self.enter_fullscreen)
         self.webview.connect("leave-fullscreen", self.leave_fullscreen)
+        self.webview.connect("resource-load-started", self.playback_resource_started)
 
         self.overlay = Gtk.Overlay()
         self.add(self.overlay)
@@ -491,6 +530,19 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.stack.add_named(self.webview, "web")
         self.overlay.add_overlay(self.progress)
         self.overlay.set_overlay_pass_through(self.progress, True)
+        self.playback_notice = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10,
+                                      halign=Gtk.Align.CENTER, valign=Gtk.Align.END)
+        self.playback_notice.set_margin_bottom(100)
+        self.playback_notice.set_no_show_all(True)
+        self.playback_notice.pack_start(Gtk.Label(label="播放连接异常"), False, False, 0)
+        recover = Gtk.Button(label="恢复播放器")
+        recover.set_tooltip_text("重新建立播放和网络会话，保留登录；也可按 Ctrl+Shift+R")
+        recover.connect("clicked", self.app.recover_player)
+        self.playback_notice.pack_start(recover, False, False, 0)
+        dismiss = Gtk.Button(label="关闭提示")
+        dismiss.connect("clicked", lambda *_: self.playback_notice.hide())
+        self.playback_notice.pack_start(dismiss, False, False, 0)
+        self.overlay.add_overlay(self.playback_notice)
         error_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16,
                             halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, margin=32)
         error_box.pack_start(Gtk.Image.new_from_icon_name("network-error-symbolic", Gtk.IconSize.DIALOG), False, False, 0)
@@ -498,7 +550,7 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.error_label.set_max_width_chars(60)
         error_box.pack_start(self.error_label, False, False, 0)
         retry = Gtk.Button(label="重新加载")
-        retry.connect("clicked", lambda *_: self.webview.load_uri(HOME_URL))
+        retry.connect("clicked", self.app.recover_player)
         error_box.pack_start(retry, False, False, 0)
         self.network_button = Gtk.Button()
         self.update_network_button()
@@ -748,7 +800,10 @@ class MusicWindow(Gtk.ApplicationWindow):
         key = Gdk.keyval_name(event.keyval)
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
         alt = event.state & Gdk.ModifierType.MOD1_MASK
-        if key == "F5" or (ctrl and key.lower() == "r"):
+        shift = event.state & Gdk.ModifierType.SHIFT_MASK
+        if ctrl and shift and key.lower() == "r":
+            self.app.recover_player()
+        elif key == "F5" or (ctrl and key.lower() == "r"):
             self.webview.reload()
         elif alt and key == "Home":
             self.webview.load_uri(HOME_URL)
@@ -771,6 +826,7 @@ class MusicWindow(Gtk.ApplicationWindow):
 
     def load_changed(self, view, event):
         if event == WebKit2.LoadEvent.STARTED:
+            self.playback_notice.hide()
             self.stack.set_visible_child_name("web")
             self.progress.show()
         elif event == WebKit2.LoadEvent.FINISHED:
@@ -804,11 +860,53 @@ class MusicWindow(Gtk.ApplicationWindow):
     def process_terminated(self, *_):
         self.show_error("网页进程已停止。点击“重新加载”继续。")
 
+    def playback_recovery_message(self, _manager, result):
+        if not self.get_window() or not is_player_uri(self.webview.get_uri()):
+            return
+        try:
+            value = result.get_js_value().to_string()
+            if len(value) > 256:
+                return
+            message = json.loads(value)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(message, dict):
+            return
+        if message.get("event") == "failed":
+            self.playback_notice.show_all()
+            self.playback_notice.show()
+        elif message.get("event") == "playing":
+            self.playback_notice.hide()
+
+    def playback_resource_started(self, _view, resource, request):
+        try:
+            parsed = urlsplit(request.get_uri())
+            host = parsed.hostname or ""
+        except ValueError:
+            return
+        audio = host.endswith(".music.126.net") and parsed.path.lower().endswith(
+            (".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav"))
+        player_api = host == "music.163.com" and parsed.path.startswith(
+            ("/weapi/song/enhance/player/url", "/api/song/enhance/player/url"))
+        if audio or player_api:
+            resource.connect("failed", self.playback_resource_failed)
+
+    def playback_resource_failed(self, _resource, error):
+        # Seeking and changing tracks normally cancel earlier media requests.
+        if (self.get_window() and is_player_uri(self.webview.get_uri())
+                and error.matches(WebKit2.network_error_quark(), WebKit2.NetworkError.FAILED)):
+            self.playback_notice.show_all()
+            self.playback_notice.show()
+
     def decide_policy(self, _view, decision, kind):
         if kind in (WebKit2.PolicyDecisionType.NAVIGATION_ACTION, WebKit2.PolicyDecisionType.NEW_WINDOW_ACTION):
             action = decision.get_navigation_action()
             uri = action.get_request().get_uri()
             if uri == "about:blank" or supported_uri(uri):
+                if hasattr(decision, "use_with_policies"):
+                    policy = WebKit2.AutoplayPolicy.ALLOW if is_music_uri(uri) else WebKit2.AutoplayPolicy.DENY
+                    decision.use_with_policies(WebKit2.WebsitePolicies(autoplay=policy))
+                    return True
                 return False
             decision.ignore()
             if action.is_user_gesture():

@@ -4,7 +4,7 @@ umask 022
 
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 output_dir=${1:-"$source_dir/dist"}
-version=1.0.3
+version=1.0.4
 package_name=netease-cloud-music-webkit
 
 for command in dpkg-deb tar gzip install python3 mkdir mktemp cp du cut; do
@@ -32,6 +32,7 @@ install -m 0644 "$source_dir/packaging/control" "$stage/DEBIAN/control"
 install -m 0755 "$source_dir/packaging/netease-cloud-music" "$stage/usr/bin/netease-cloud-music"
 install -m 0644 "$source_dir/app.py" "$stage/usr/share/netease-cloud-music/app.py"
 install -m 0644 "$source_dir/assets/"*.svg "$stage/usr/share/netease-cloud-music/assets/"
+install -m 0644 "$source_dir/assets/playback-recovery.js" "$stage/usr/share/netease-cloud-music/assets/"
 install -m 0644 "$source_dir/assets/netease-cloud-music.svg" "$stage/usr/share/icons/hicolor/scalable/apps/netease-cloud-music.svg"
 install -m 0644 "$source_dir/packaging/netease-cloud-music.desktop" "$stage/usr/share/applications/netease-cloud-music.desktop"
 install -m 0644 "$source_dir/README.md" "$stage/usr/share/doc/$package_name/README.zh-CN.md"

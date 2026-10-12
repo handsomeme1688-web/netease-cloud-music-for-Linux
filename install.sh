@@ -31,6 +31,7 @@ icon_dir="$data_home/icons/hicolor/scalable/apps"
 install -d "$app_dir/assets" "$bin_home" "$desktop_dir" "$icon_dir"
 install -m 0644 "$source_dir/app.py" "$app_dir/app.py"
 install -m 0644 "$source_dir/assets/"*.svg "$app_dir/assets/"
+install -m 0644 "$source_dir/assets/playback-recovery.js" "$app_dir/assets/"
 install -m 0644 "$source_dir/assets/netease-cloud-music.svg" "$icon_dir/netease-cloud-music.svg"
 install -m 0755 "$source_dir/uninstall.sh" "$app_dir/uninstall.sh"
 

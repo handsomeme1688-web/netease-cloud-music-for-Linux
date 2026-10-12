@@ -396,6 +396,20 @@ class LoginReturnTests(unittest.TestCase):
         self.main.present.assert_not_called()
         self.assertEqual(self.cookies.pending, [])
 
+    def test_replaced_session_ignores_old_cookie_reply(self):
+        self.cookies.reply([])
+        self.cookies.changed()
+        self.application.stop_login_watch()
+        new = CookieManager()
+        self.application.manager = SimpleNamespace(get_cookie_manager=lambda: new)
+        self.application.start_login_watch()
+        self.cookies.reply(authenticated("old-session-reply"))
+        self.assertTrue(self.application._login_read_pending)
+        self.assertIsNone(self.application._login_fingerprint)
+        new.reply([])
+        self.assertFalse(self.application._login_read_pending)
+        self.assertEqual(self.application._login_fingerprint, b"")
+
 
 if __name__ == "__main__":
     unittest.main()
