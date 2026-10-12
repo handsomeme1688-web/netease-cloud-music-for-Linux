@@ -1,5 +1,7 @@
 """Native CDN request boundaries and complete, bounded audio delivery."""
 import base64
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -39,6 +41,61 @@ class AudioBufferTests(unittest.TestCase):
         self.assertIsInstance(self.buffer.session.props.proxy_resolver, app.Gio.SimpleProxyResolver)
         self.assertEqual(self.buffer.session.props.proxy_resolver.lookup(
             'https://m10.music.126.net/fixture.mp3', None), ['direct://'])
+
+    def test_native_session_delivers_complete_audio_across_soup_versions(self):
+        payload = b'fixture-audio-' * 12000
+        requests = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                requests.append((self.path, self.headers.get('Referer')))
+                self.send_response(200)
+                self.send_header('Content-Type', 'audio/mpeg')
+                self.send_header('Content-Length', str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        loop = GLib.MainLoop()
+        chunks, outcomes = [], []
+
+        def deliver(identifier, event, data, continuation=None):
+            if event == 'chunk':
+                chunks.append(base64.b64decode(data['data']))
+                continuation()
+            else:
+                outcomes.append((event, data))
+                loop.quit()
+
+        def timeout():
+            outcomes.append(('timeout', {}))
+            loop.quit()
+            return GLib.SOURCE_REMOVE
+
+        server = HTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.buffer.send = deliver
+        timer = GLib.timeout_add_seconds(10, timeout)
+        try:
+            # The loopback fixture checks the native transport; production URL
+            # validation is tested separately and still permits only the CDN.
+            with patch('audio_buffer.audio_uri', return_value=(
+                    'http://127.0.0.1:%d/fixture.mp3' % server.server_port)):
+                self.buffer.request('fixture-1', 'https://m10.music.126.net/fixture.mp3')
+            loop.run()
+            self.assertEqual(outcomes, [('complete', {'bytes': len(payload), 'mime': 'audio/mpeg'})])
+            self.assertEqual(b''.join(chunks), payload)
+            self.assertEqual(requests, [('/fixture.mp3', 'https://music.163.com/')])
+        finally:
+            if outcomes != [('timeout', {})]:
+                GLib.source_remove(timer)
+            self.buffer.cancel_all()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_cancel_invalidates_late_callbacks(self):
         job = self.job()
