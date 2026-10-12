@@ -3,9 +3,9 @@ name: Debian and Ubuntu compatibility
 on:
   push:
     branches: [main]
-    paths: [app.py, "*.sh", "packaging/**", "assets/**", "tests/**", .github/workflows/compatibility.yml]
+    paths: ["*.py", "*.sh", "packaging/**", "assets/**", "tests/**", .github/workflows/compatibility.yml]
   pull_request:
-    paths: [app.py, "*.sh", "packaging/**", "assets/**", "tests/**", .github/workflows/compatibility.yml]
+    paths: ["*.py", "*.sh", "packaging/**", "assets/**", "tests/**", .github/workflows/compatibility.yml]
   workflow_dispatch:
 
 permissions:

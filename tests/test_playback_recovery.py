@@ -225,7 +225,7 @@ class PlaybackPolicyTests(unittest.TestCase):
 
     def test_deep_recovery_replaces_session_and_preserves_state(self):
         window = SimpleNamespace(webview=SimpleNamespace(stop_loading=Mock()),destroy=Mock())
-        application = SimpleNamespace(main_window=window,hold=Mock(),release=Mock(),save_state=Mock(),
+        application = SimpleNamespace(system_media=Mock(),main_window=window,hold=Mock(),release=Mock(),save_state=Mock(),
             stop_login_watch=Mock(),get_windows=lambda:[window],create_web_context=Mock(),do_activate=Mock())
         app.MusicApplication.recover_player(application)
         application.save_state.assert_called_once_with(window)
@@ -239,7 +239,7 @@ class PlaybackPolicyTests(unittest.TestCase):
 
     def test_recovery_failure_releases_application_hold(self):
         window = SimpleNamespace(webview=SimpleNamespace(stop_loading=Mock()),destroy=Mock())
-        application = SimpleNamespace(main_window=window,hold=Mock(),release=Mock(),save_state=Mock(),
+        application = SimpleNamespace(system_media=Mock(),main_window=window,hold=Mock(),release=Mock(),save_state=Mock(),
             stop_login_watch=Mock(),get_windows=lambda:[window],create_web_context=Mock(side_effect=RuntimeError),do_activate=Mock())
         with self.assertRaises(RuntimeError):app.MusicApplication.recover_player(application)
         application.release.assert_called_once_with()

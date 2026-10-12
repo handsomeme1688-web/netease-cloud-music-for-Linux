@@ -16,7 +16,7 @@
 在 Debian/Ubuntu 桌面打开终端，切换到安装包所在目录后运行：
 
 ```sh
-sudo apt install ./netease-cloud-music-webkit_1.0.4_all.deb
+sudo apt install ./netease-cloud-music-webkit_1.0.5_all.deb
 ```
 
 APT 会根据本机发行版和架构解析安装包声明的全部依赖，并选择仓库可用的 WebKitGTK 接口。安装完成后，在应用菜单中搜索“网易云音乐”，或在终端执行：
@@ -161,6 +161,8 @@ v1.0.3 修复扫码登录后停留在旧版登录界面的问题：进入官方�
 
 ## 播放中断与恢复
 
+v1.0.5 修正系统媒体卡片的应用名称和图标：显示“网易云音乐”及网易云图标，保留歌曲信息、封面与播放、暂停、上一首、下一首控制。桌面环境须支持 MPRIS，并能读取已安装的 `netease-cloud-music.desktop`。
+
 v1.0.4 修正了音乐页面的异步播放策略，让自动下一首及获取歌曲地址后的播放不再因为缺少即时鼠标手势而被拒绝。
 
 应用对已开始播放但进度长时间不再前进的音频进行恢复：一般等待 15 秒，正在跳转进度时等待 30 秒，再重新加载当前音频并尝试回到原进度。同一个音频地址最多自动重试两次；重试期间点击暂停会取消恢复。正在加载的音频只重试加载，不会自行启动已暂停的播放。
@@ -268,7 +270,7 @@ sudo apt install bash coreutils dpkg tar gzip python3
 bash build-package.sh ./dist
 ```
 
-生成 `netease-cloud-music-webkit_1.0.4_all.deb` 和 `netease-cloud-music-1.0.4-source.tar.gz`。
+生成 `netease-cloud-music-webkit_1.0.5_all.deb` 和 `netease-cloud-music-1.0.5-source.tar.gz`。
 未提供输出目录时，使用源码目录下的 `dist`。
 在已安装运行依赖的环境中，可运行兼容性回归测试（无需打开窗口）：
 

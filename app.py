@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 
@@ -52,6 +52,8 @@ except (ImportError, ValueError) as exc:
           "WebKit 组件优先使用 gir1.2-webkit2-4.1；较旧软件源可使用 gir1.2-webkit2-4.0。\n"
           f"详细信息：{exc}", file=sys.stderr)
     sys.exit(1)
+
+from media_service import MediaService
 
 if (Gtk.MAJOR_VERSION, Gtk.MINOR_VERSION) < (3, 24):
     print("需要 GTK 3.24 或更新的 GTK 3 版本。", file=sys.stderr)
@@ -214,6 +216,9 @@ class MusicApplication(Gtk.Application):
         except (OSError, ValueError):
             pass
         self.create_web_context()
+        self.system_media = MediaService(
+            self.get_dbus_connection(), APP_ID, APP_NAME, STORAGE_NAME,
+            self.media_control, self.do_activate, self.quit)
         icon = Path(__file__).resolve().parent / "assets" / "netease-cloud-music.svg"
         Gtk.IconTheme.get_default().append_search_path(str(icon.parent))
         if icon.exists():
@@ -245,6 +250,7 @@ class MusicApplication(Gtk.Application):
         self._recovering_player = True
         self.hold()
         try:
+            self.system_media.reset()
             self.save_state(self.main_window)
             self.stop_login_watch()
             # A page reload keeps the same network session and media process.
@@ -273,10 +279,18 @@ class MusicApplication(Gtk.Application):
         self.main_window.present()
 
     def do_shutdown(self):
+        self.system_media.close()
         self.stop_login_watch()
         if self.main_window:
             self.save_state(self.main_window)
         Gtk.Application.do_shutdown(self)
+
+    def media_control(self, action, args):
+        if self.main_window is None or not is_player_uri(self.main_window.webview.get_uri()):
+            return
+        script = "window.__neteaseSystemMedia && window.__neteaseSystemMedia(%s, %s)" % (
+            json.dumps(action), json.dumps(args))
+        self.main_window.webview.run_javascript(script, None, None, None)
 
     def start_login_watch(self):
         self._login_windows = weakref.WeakSet()
@@ -505,6 +519,13 @@ class MusicWindow(Gtk.ApplicationWindow):
             manager.add_script(WebKit2.UserScript.new(
                 script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
                 WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/st/webplayer*"], None))
+            if not self.is_popup:
+                manager.register_script_message_handler("systemMedia")
+                manager.connect("script-message-received::systemMedia", self.system_media_message)
+                media_script = Path(__file__).resolve().parent / "assets" / "system-media.js"
+                manager.add_script(WebKit2.UserScript.new(
+                    media_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                    WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/st/webplayer*"], None))
         self.webview.set_zoom_level(number("zoom", 1.0, 0.5, 2.0))
         self.webview.connect("load-changed", self.load_changed)
         self.webview.connect("load-failed", self.load_failed)
@@ -826,6 +847,8 @@ class MusicWindow(Gtk.ApplicationWindow):
 
     def load_changed(self, view, event):
         if event == WebKit2.LoadEvent.STARTED:
+            if not self.is_popup:
+                self.get_application().system_media.reset()
             self.playback_notice.hide()
             self.stack.set_visible_child_name("web")
             self.progress.show()
@@ -858,7 +881,21 @@ class MusicWindow(Gtk.ApplicationWindow):
         return True
 
     def process_terminated(self, *_):
+        if not self.is_popup:
+            self.get_application().system_media.reset()
         self.show_error("网页进程已停止。点击“重新加载”继续。")
+
+    def system_media_message(self, _manager, result):
+        if not self.get_window() or not is_player_uri(self.webview.get_uri()):
+            return
+        try:
+            value = result.get_js_value().to_string()
+            if len(value) > 16384:
+                return
+            message = json.loads(value)
+        except (ValueError, TypeError):
+            return
+        self.get_application().system_media.update(message)
 
     def playback_recovery_message(self, _manager, result):
         if not self.get_window() or not is_player_uri(self.webview.get_uri()):
