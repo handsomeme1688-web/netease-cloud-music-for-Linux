@@ -1,22 +1,25 @@
 """Howler loading, seek preroll and cancellation across track changes."""
 from pathlib import Path
 import json
+import time
 import unittest
 import gi
 for api in ('4.1','4.0'):
     try:gi.require_version('JavaScriptCore',api);break
     except ValueError:pass
-from gi.repository import JavaScriptCore as JSC
+from gi.repository import JavaScriptCore as JSC, GLib
 
 FIXTURE=r'''
 const location={origin:'https://music.163.com',pathname:'/st/webplayer'};
 const window={addEventListener:()=>{}};
 const setInterval=()=>1,clearInterval=()=>{};
 function Node(){this.paused=true;this.readyState=2;this.src='track-a';this.error=null;this.plays=0;}
-Node.prototype.play=function(){this.plays++;this.paused=false;this.readyState=4;return Promise.resolve()};
+Node.prototype.play=function(){this.plays++;this.paused=false;if(!this.stayCurrent)this.readyState=4;return Promise.resolve()};
+function Event(type){this.type=type;}
+Node.prototype.dispatchEvent=function(event){if(event.type==='canplay'&&this.onCanPlay)this.onCanPlay();};
 function Howl(){this._src='track-a';this._state='loaded';this._playLock=false;this._queue=[];this._sprite={__default:[0,90000]};this._sounds=[{_id:1,_seek:0,_node:new Node()}];}
 Howl.prototype.load=function(){this._state='loading';return this;};
-Howl.prototype.play=function(){const node=this._sounds[0]._node;if(node.readyState>=3)node.play();else{this._playLock=true;this._state='loading';}return 1;};
+Howl.prototype.play=function(){const node=this._sounds[0]._node;if(node.readyState>=3)node.play();else{this._playLock=true;this._state='loading';node.onCanPlay=()=>{this._playLock=false;this._state='loaded';};}return 1;};
 Howl.prototype.seek=function(value){if(this._state!=='loaded'||this._playLock){this._queue.push({event:'seek',action:()=>this.seek(value)});return this;}this._sounds[0]._seek=value;return this;};
 Howl.prototype._clearTimer=function(){this.cleared=true;};
 Howl.prototype._loadQueue=function(){this.drained=true;};
@@ -36,6 +39,10 @@ class MediaReadinessTests(unittest.TestCase):
 
     def snapshot(self,source):
         self.evaluate(source)
+        until=time.monotonic()+.03
+        while time.monotonic()<until:
+            while GLib.MainContext.default().pending():GLib.MainContext.default().iteration(False)
+            time.sleep(.001)
         return json.loads(self.evaluate("JSON.stringify({event:window.Howler._canPlayEvent,plays:h._sounds[0]._node.plays,state:h._state,lock:h._playLock,seek:h._sounds[0]._seek,queue:h._queue.length,drained:!!h.drained})").to_string())
 
     def test_library_is_configured_before_first_track(self):
@@ -43,6 +50,12 @@ class MediaReadinessTests(unittest.TestCase):
 
     def test_seek_with_current_data_primes_media_instead_of_deadlocking(self):
         result=self.snapshot('h.play(1)')
+        self.assertGreater(result['plays'],0)
+        self.assertFalse(result['lock'])
+        self.assertEqual(result['state'],'loaded')
+
+    def test_native_play_completion_releases_lock_even_if_ready_state_stays_two(self):
+        result=self.snapshot('h._sounds[0]._node.stayCurrent=true;h._sounds[0]._node.duration=90;h.play(1)')
         self.assertGreater(result['plays'],0)
         self.assertFalse(result['lock'])
         self.assertEqual(result['state'],'loaded')

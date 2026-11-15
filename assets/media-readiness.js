@@ -29,6 +29,7 @@
         patched.add(proto);
         const load = proto.load, seek = proto.seek, play = proto.play;
         proto.play = function () {
+            let priming = null, primed = null, source = '';
             // After an HTML5 seek, WebKit may wait for play() to preroll while
             // Howler waits for canplay before calling play(): break that cycle.
             if (!this._webAudio && this._state === 'loaded') {
@@ -38,18 +39,29 @@
                     const audio = sound._node;
                     if (audio && audio.paused && audio.readyState === 2 && !audio.error &&
                         (audio.src || audio.currentSrc)) {
-                        const pending = audio.play();
-                        if (pending && pending.catch) pending.catch(() => {});
+                        source = audio.src;
+                        primed = audio;
+                        priming = audio.play();
                         break;
                     }
                 }
             }
-            return play.apply(this, arguments);
+            const result = play.apply(this, arguments);
+            if (priming && priming.then) priming.then(() => {
+                // Some WebKit pipelines stay at HAVE_CURRENT_DATA even after
+                // playback really starts. Use that completed native request as
+                // readiness proof, so Howler can release its pending play lock.
+                if (primed.src === source && !primed.paused && !primed.error &&
+                    primed.duration > 0 && (this._state === 'loading' || this._playLock))
+                    primed.dispatchEvent(new Event('canplay'));
+            }, () => {});
+            return result;
         };
         proto.load = function () {
             const source = key(this), previous = sources.get(this);
             if (previous !== undefined && previous !== source) {
                 this._playLock = false;
+                this._duration = 0;
                 this._queue = (this._queue || []).filter(item => item.event !== 'seek');
                 for (const sound of this._sounds || []) {
                     if (this._clearTimer) this._clearTimer(sound._id);

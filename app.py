@@ -546,6 +546,14 @@ class MusicWindow(Gtk.ApplicationWindow):
             manager.add_script(WebKit2.UserScript.new(
                 native_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
                 WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/st/webplayer*"], None))
+            decoded_script = Path(__file__).resolve().parent / "assets" / "web-audio-playback.js"
+            manager.add_script(WebKit2.UserScript.new(
+                decoded_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/*"], None))
+            state_script = Path(__file__).resolve().parent / "assets" / "decoded-media-state.js"
+            manager.add_script(WebKit2.UserScript.new(
+                state_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/*"], None))
             buffer_script = Path(__file__).resolve().parent / "assets" / "buffered-playback.js"
             manager.add_script(WebKit2.UserScript.new(
                 buffer_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,

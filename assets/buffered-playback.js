@@ -143,7 +143,7 @@
         startWaitingPlay(state);
     };
     const guarded = new WeakSet();
-    
+
     const protect = audio => {
         if (guarded.has(audio)) return;
         guarded.add(audio);

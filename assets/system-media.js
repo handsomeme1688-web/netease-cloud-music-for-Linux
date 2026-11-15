@@ -35,6 +35,7 @@
             send(true);
         };
     }
+    const nativeHowl = () => typeof window.__musicNativeHowl === 'function' ? window.__musicNativeHowl() : null;
     function send(force) {
         const now = performance.now();
         if (!force && now - lastSent < 1000) return;
@@ -43,12 +44,14 @@
         if (metadata && metadata.artwork && metadata.artwork.length)
             artwork = metadata.artwork[metadata.artwork.length - 1].src;
         const number = value => Number.isFinite(value) ? value : 0;
+        const howl = nativeHowl();
+        const decoded = howl && howl._state === 'loaded';
         window.webkit.messageHandlers.systemMedia.postMessage(JSON.stringify({
-            active: !!(audio && (audio.currentSrc || audio.src)),
-            playing: !!(audio && !audio.paused && !audio.ended),
-            position: audio ? number(audio.currentTime) : 0,
-            duration: audio ? number(audio.duration) : 0,
-            volume: audio ? audio.volume : 1,
+            active: !!(howl && howl._state !== 'unloaded') || !!(audio && (audio.currentSrc || audio.src)),
+            playing: howl ? !!(decoded && howl.playing()) : !!(audio && !audio.paused && !audio.ended),
+            position: howl ? (decoded ? number(howl.seek()) : 0) : (audio ? number(audio.currentTime) : 0),
+            duration: howl ? (decoded ? number(howl.duration()) : 0) : (audio ? number(audio.duration) : 0),
+            volume: howl ? number(howl.volume() * window.Howler.volume()) : (audio ? audio.volume : 1),
             metadata: {title: metadata ? metadata.title : document.title,
                 artist: metadata ? metadata.artist : '', album: metadata ? metadata.album : '', artwork: artwork},
             actions: Array.from(handlers.keys())
@@ -77,20 +80,37 @@
     window.addEventListener('pagehide', () => {
         window.webkit.messageHandlers.systemMedia.postMessage(JSON.stringify({active: false}));
     });
-    window.addEventListener('pageshow', () => send(true));
+    let decodedTimer = null;
+    const startUpdates = () => {
+        if (decodedTimer === null)
+            decodedTimer = setInterval(() => { if (nativeHowl()) send(false); }, 1000);
+    };
+    startUpdates();
+    window.addEventListener('pageshow', () => { startUpdates(); send(true); });
+    window.addEventListener('pagehide', () => { clearInterval(decodedTimer); decodedTimer = null; });
     Object.defineProperty(window, '__neteaseSystemMedia', {value: function (action, args) {
-        if (!audio) return;
-        if (action === 'toggle') action = audio.paused ? 'play' : 'pause';
+        const howl = nativeHowl();
+        if (!audio && !howl) return;
+        const position = howl && howl._state === 'loaded' ? howl.seek() : (audio ? audio.currentTime : 0);
+        const duration = howl && howl._state === 'loaded' ? howl.duration() : (audio ? audio.duration : 0);
+        const playing = howl ? howl.playing() : !audio.paused;
+        if (action === 'toggle') action = playing ? 'pause' : 'play';
         if (action === 'seek') {
-            args.seekTime = Math.max(0, audio.currentTime + args.offset);
+            args.seekTime = Math.max(0, position + args.offset);
             action = 'seekto';
         }
         if (action === 'seekto') {
-            if (!Number.isFinite(audio.duration)) return;
-            args.seekTime = Math.max(0, Math.min(audio.duration, args.seekTime));
+            if (!Number.isFinite(duration)) return;
+            args.seekTime = Math.max(0, Math.min(duration, args.seekTime));
         }
         if (handlers.has(action)) {
             handlers.get(action)(Object.assign({action: action}, args));
+        } else if (howl) {
+            if (action === 'play') howl.play();
+            else if (action === 'pause') howl.pause();
+            else if (action === 'stop') howl.stop();
+            else if (action === 'seekto') howl.seek(args.seekTime);
+            else if (action === 'volume') window.Howler.volume(args.value);
         } else if (action === 'play') {
             const promise = audio.play();
             if (promise && promise.catch) promise.catch(() => {});
