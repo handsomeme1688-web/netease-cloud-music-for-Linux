@@ -46,6 +46,8 @@ class AudioCacheTests(unittest.TestCase):
             self.assertEqual(response.status,200)
             self.assertEqual(response.read(),b'0123456789')
             self.assertEqual(response.headers['Accept-Ranges'],'bytes')
+            self.assertEqual(response.headers['Access-Control-Allow-Origin'],'https://music.163.com')
+            self.assertEqual(response.headers['Access-Control-Allow-Credentials'],'true')
             self.assertEqual(response.headers['Content-Length'],'10')
 
     def test_seek_range_is_exact_and_head_has_no_body(self):

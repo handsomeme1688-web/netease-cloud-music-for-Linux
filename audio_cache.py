@@ -79,6 +79,8 @@ class AudioCache:
                 self.send_header('Content-Length', str(end - start + 1))
                 self.send_header('Accept-Ranges', 'bytes')
                 self.send_header('Cache-Control', 'no-store')
+                self.send_header('Access-Control-Allow-Origin', 'https://music.163.com')
+                self.send_header('Access-Control-Allow-Credentials', 'true')
                 self.send_header('Connection', 'close')
                 if status == 206:
                     self.send_header('Content-Range', 'bytes %d-%d/%d' % (start, end, len(data)))
