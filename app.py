@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.0.8"
+VERSION = "1.0.9"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 PLAYBACK_LOG_LIMIT = 2 * 1024 * 1024
@@ -56,7 +56,8 @@ except (ImportError, ValueError) as exc:
     sys.exit(1)
 
 from media_service import MediaService
-from audio_buffer import AudioBuffer, delivery_script
+from audio_buffer import delivery_script
+from audio_cache import AudioCache
 
 if (Gtk.MAJOR_VERSION, Gtk.MINOR_VERSION) < (3, 24):
     print("需要 GTK 3.24 或更新的 GTK 3 版本。", file=sys.stderr)
@@ -531,10 +532,16 @@ class MusicWindow(Gtk.ApplicationWindow):
                 WebKit2.UserContentInjectedFrames.TOP_FRAME,
                 WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/*"], None))
             manager = self.webview.get_user_content_manager()
-            self.audio_buffer = AudioBuffer(WEBKIT_API, app.proxy_mode, self.deliver_native_audio)
-            self.connect("destroy", lambda *_: self.audio_buffer.cancel_all())
+            self.audio_buffer = AudioCache(WEBKIT_API, app.proxy_mode, self.deliver_native_audio)
+            certificate = Gio.TlsCertificate.new_from_pem(self.audio_buffer.certificate, -1)
+            app.context.allow_tls_certificate_for_host(certificate, "127.0.0.1")
+            self.connect("destroy", lambda *_: self.audio_buffer.close())
             manager.register_script_message_handler("nativeAudio")
             manager.connect("script-message-received::nativeAudio", self.native_audio_message)
+            readiness_script = Path(__file__).resolve().parent / "assets" / "media-readiness.js"
+            manager.add_script(WebKit2.UserScript.new(
+                readiness_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/*"], None))
             native_script = Path(__file__).resolve().parent / "assets" / "native-audio.js"
             manager.add_script(WebKit2.UserScript.new(
                 native_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,

@@ -6,7 +6,7 @@
         location.pathname.replace(/\/$/, '') !== '/st/webplayer' ||
         typeof AbortController !== 'function') return;
     const LIMIT = 64 * 1024 * 1024;
-    const WAIT = 4000;
+    const WAIT = 6000;
     const states = new WeakMap();
     // Includes downloads, not just completed copies. Selected copies stay pinned
     // until the site replaces their source, even if the element is paused.
@@ -39,8 +39,9 @@
     const release = state => {
         entries.delete(state);
         state.reserved = 0;
-        if (state.objectURL) URL.revokeObjectURL(state.objectURL);
-        state.objectURL = null;
+        if (state.release) state.release();
+        state.release = null;
+        state.copyURL = null;
     };
     const clearReady = state => {
         clearInterval(state.readyTimer);
@@ -78,7 +79,7 @@
             if (current(state) && state.epoch === epoch &&
                 state.resource !== resource && rawSource(state.audio) === state.resource) {
                 if (state.started && !state.audio.paused) return;
-                // A failed blob can leave a stale decoder error until the new
+                // A failed copy can leave a stale decoder error until the new
                 // resource reaches canplay. Do not immediately replay that error.
                 return new Promise((resolve, reject) => {
                     let timer;
@@ -117,8 +118,9 @@
         state.mode = mode;
         cancelDownload(state);
         if (mode === 'stream') release(state);
-        state.resource = mode === 'copy' ? state.objectURL : state.source;
+        state.resource = mode === 'copy' ? state.copyURL : state.source;
         notify(mode === 'copy' ? 'copy-start' : 'stream-start', {reason});
+        state.audio.preload = 'auto';
         setSource(state.audio, state.resource);
         nativeLoad.call(state.audio);
         startWaitingPlay(state);
@@ -126,7 +128,7 @@
     const fallback = (state, reason) => {
         if (!current(state)) return;
         if (state.mode === 'waiting') { select(state, 'stream', reason); return; }
-        // A blob that cannot start may fall back once. Never replace a source
+        // A copy that cannot start may fall back once. Never replace a source
         // after it has played: a reload would invalidate the site's seek state.
         if (state.mode !== 'copy' || state.started || state.audio.currentTime > 0) return;
         clearReady(state);
@@ -141,7 +143,7 @@
         startWaitingPlay(state);
     };
     const guarded = new WeakSet();
-    const readyEvents = ['durationchange', 'loadedmetadata', 'loadeddata', 'canplay', 'canplaythrough'];
+    
     const protect = audio => {
         if (guarded.has(audio)) return;
         guarded.add(audio);
@@ -160,28 +162,7 @@
                 fallback(state, 'copy-unavailable');
             }
         }, true);
-        for (const type of readyEvents) audio.addEventListener(type, event => {
-            const state = states.get(audio);
-            if (!event.isTrusted || !state || state.mode !== 'copy') return;
-            if (audio.duration > 0) { startWaitingPlay(state); return; }
-            // Some WebKit versions signal readiness before knowing MP3 duration.
-            // Delay only those initial events; never replace media properties.
-            event.stopImmediatePropagation();
-            if (!state.deferred.includes(type)) state.deferred.push(type);
-            if (state.readyTimer) return;
-            const since = performance.now();
-            state.readyTimer = setInterval(() => {
-                if (!current(state)) { clearReady(state); return; }
-                if (!(audio.duration > 0 && Number.isFinite(audio.duration))) {
-                    if (performance.now() - since >= 2000) fallback(state, 'unknown-duration');
-                    return;
-                }
-                clearInterval(state.readyTimer);
-                state.readyTimer = 0;
-                startWaitingPlay(state);
-                for (const name of state.deferred.splice(0)) audio.dispatchEvent(new Event(name));
-            }, 20);
-        }, true);
+
     };
     const prepare = async state => {
         const controller = state.controller;
@@ -191,30 +172,15 @@
                 try { reserve(state, Math.max(received, total)); }
                 catch (_) { fallback(state, 'cache-limit'); }
             };
-            const response = window.__musicFetchNativeAudio ?
-                await window.__musicFetchNativeAudio(state.source, controller.signal, progress) :
-                await fetch(state.source, {cache: 'no-store', signal: controller.signal});
-            if (!current(state) || state.mode !== 'waiting') return;
-            if (response.status !== 200 || !response.body || !response.body.getReader)
+            if (!window.__musicFetchNativeAudio) throw new Error('Native cache unavailable');
+            const response = await window.__musicFetchNativeAudio(state.source, controller.signal, progress);
+            if (!current(state) || state.mode !== 'waiting') { response.release(); return; }
+            state.release = typeof response.release === 'function' ? response.release : null;
+            if (response.status !== 200 || !Number.isSafeInteger(response.bytes) || response.bytes <= 0 || !state.release)
                 throw new Error('Complete audio unavailable');
-            const declared = Number(response.headers.get('Content-Length'));
-            reserve(state, Number.isFinite(declared) && declared > 0 ? declared : 0);
-            const reader = response.body.getReader();
-            const chunks = [];
-            let bytes = 0;
-            try {
-                for (;;) {
-                    const chunk = await reader.read();
-                    if (chunk.done) break;
-                    bytes += chunk.value.byteLength;
-                    reserve(state, bytes);
-                    chunks.push(chunk.value);
-                }
-            } catch (error) { await reader.cancel().catch(() => {}); throw error; }
-            if (!bytes || (declared > 0 && declared !== bytes)) throw new Error('Truncated audio');
-            if (!current(state) || state.mode !== 'waiting') return;
-            const blob = new Blob(chunks, {type: response.headers.get('Content-Type') || 'audio/mpeg'});
-            state.objectURL = URL.createObjectURL(blob);
+            reserve(state, response.bytes);
+            const bytes = response.bytes;
+            state.copyURL = response.url;
             notify('buffer-ready', {bytes});
             select(state, 'copy', 'complete');
         } catch (error) {
@@ -222,8 +188,8 @@
         }
     };
     const hold = (audio, value) => {
-        const state = {audio, source: value, mode: 'waiting', resource: '', objectURL: null,
-            reserved: 0, started: false, transitioning: false, epoch: 0, controller: new AbortController(),
+        const state = {audio, source: value, mode: 'waiting', resource: '', copyURL: null,
+            release: null, reserved: 0, started: false, transitioning: false, epoch: 0, controller: new AbortController(),
             waiters: [], replays: new Set(), deferred: [], readyTimer: 0, transitionTimer: 0, timer: 0};
         states.set(audio, state);
         waiting.add(state);
@@ -278,12 +244,12 @@
         configurable: currentSource.configurable, enumerable: currentSource.enumerable,
         get: function () {
             const state = states.get(this), raw = currentSource.get.call(this);
-            return state && raw === state.objectURL ? state.source : raw;
+            return state && raw === state.copyURL ? state.source : raw;
         }
     });
     Object.defineProperty(window, '__musicHasCompleteAudio', {value: audio => {
         const state = states.get(audio);
-        return !!(state && state.mode === 'copy' && rawSource(audio) === state.objectURL);
+        return !!(state && state.mode === 'copy' && rawSource(audio) === state.copyURL);
     }});
     Object.defineProperty(window, '__musicPlaybackManaged', {value: audio => {
         const state = states.get(audio);

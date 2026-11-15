@@ -28,7 +28,7 @@ const pageListeners={};
 const window={addEventListener:(name,fn)=>pageListeners[name]=fn,webkit:{messageHandlers:{playbackRecovery:{postMessage:v=>notes.push(JSON.parse(v))}}}};
 class URL{constructor(source){const m=/^(https?):\/\/([^/]+)/.exec(source);if(!m)throw new Error();
  this.protocol=m[1]+':';this.hostname=m[2];}
- static createObjectURL(blob){const id='blob:fixture-'+created.length;created.push(id);return id;}
+ static createObjectURL(blob){const id='cache:fixture-'+created.length;created.push(id);return id;}
  static revokeObjectURL(id){revoked.push(id);}}
 class Blob{constructor(chunks){this.size=chunks.reduce((s,c)=>s+c.byteLength,0);}}
 class DOMException extends Error{constructor(message,name){super(message);this.name=name;}}
@@ -37,9 +37,8 @@ class Event{constructor(type){this.type=type;this.isTrusted=false;this.stopped=f
  stopImmediatePropagation(){this.stopped=true;}}
 window.__musicFetchNativeAudio=(url,signal,progress)=>new Promise((resolve,reject)=>{
  const request={url,signal,progress,resolve,reject,
-  complete(bytes){resolve({status:200,headers:{get:k=>k==='Content-Length'?String(bytes):'audio/mpeg'},
-   body:{getReader:()=>{let sent=false;return{read:async()=>sent?{done:true}:(sent=true,{done:false,value:{byteLength:bytes}}),
-   cancel:async()=>{}};}}});},
+  complete(bytes){if(signal.aborted)return;const url='cache:fixture-'+created.length;created.push(url);
+    resolve({status:200,bytes,url,release:()=>revoked.push(url)});},
   fail(){reject(new Error('native failure'));}};
  natives.push(request);});
 class HTMLMediaElement{
@@ -122,7 +121,7 @@ class BufferedPlaybackTests(unittest.TestCase):
         self.assertEqual(state['natives'],1)
         self.run_js('natives[0].complete(3);')
         state=self.run_js('engineReady(audio,90);audio.play();')
-        self.assertEqual(state['raw'],'blob:fixture-0')
+        self.assertEqual(state['raw'],'cache:fixture-0')
         self.assertEqual(state['site'],['canplaythrough:90'])
         self.assertFalse(state['paused'])
 
@@ -147,11 +146,11 @@ class BufferedPlaybackTests(unittest.TestCase):
         state=self.run_js('advance(1000);natives[0].progress(100000,10000000);')
         self.assertEqual(state['raw'],'')
         state=self.run_js('natives[0].complete(10000000);')
-        self.assertEqual(state['raw'],'blob:fixture-0')
+        self.assertEqual(state['raw'],'cache:fixture-0')
 
     def test_timeout_cancels_download_and_ignores_late_completion(self):
         self.start_track()
-        state=self.run_js('advance(4000);')
+        state=self.run_js('advance(6000);')
         self.assertEqual(state['raw'],self.evaluate('CDN').to_string())
         self.assertTrue(state['aborted'][0])
         state=self.run_js('natives[0].complete(3);advance(10000);')
@@ -161,14 +160,14 @@ class BufferedPlaybackTests(unittest.TestCase):
     def test_pause_does_not_change_selected_resource_or_progress(self):
         self.copy_playing()
         state=self.run_js('audio.pause();advance(30000);')
-        self.assertEqual(state['raw'],'blob:fixture-0')
+        self.assertEqual(state['raw'],'cache:fixture-0')
         self.assertEqual(state['time'],30)
         self.assertTrue(state['paused'])
         self.assertEqual(state['revoked'],[])
 
     def test_stream_stall_and_low_buffer_do_not_switch_sources(self):
         self.start_track()
-        self.run_js('advance(4000);engineReady(audio,90,[[0,31]]);audio.play();audio._time=30;')
+        self.run_js('advance(6000);engineReady(audio,90,[[0,31]]);audio.play();audio._time=30;')
         state=self.run_js('natives[0].complete(3);audio.readyState=2;advance(30000);')
         self.assertEqual(state['raw'],self.evaluate('CDN').to_string())
         self.assertEqual(state['time'],30)
@@ -209,12 +208,12 @@ class BufferedPlaybackTests(unittest.TestCase):
         self.run_js('engineReady(audio,90);audio.pause();const second=new HTMLMediaElement();second.src="https://m10.music.126.net/two.mp3";')
         state=self.run_js('natives[1].progress(1,40*1024*1024);')
         self.assertEqual(state['revoked'],[])
-        self.assertEqual(state['raw'],'blob:fixture-0')
+        self.assertEqual(state['raw'],'cache:fixture-0')
 
     def test_changing_source_releases_the_previous_copy(self):
         self.copy_playing()
         state=self.run_js('audio.src="data:audio/wav;base64,AAAA";')
-        self.assertEqual(state['revoked'],['blob:fixture-0'])
+        self.assertEqual(state['revoked'],['cache:fixture-0'])
         self.assertEqual(state['raw'],'data:audio/wav;base64,AAAA')
 
     def test_blob_error_before_start_falls_back_without_retry_loop(self):
@@ -230,24 +229,22 @@ class BufferedPlaybackTests(unittest.TestCase):
     def test_blob_error_after_playback_is_not_hidden_or_restarted(self):
         self.copy_playing()
         state=self.run_js('engineError(audio);advance(30000);')
-        self.assertEqual(state['raw'],'blob:fixture-0')
+        self.assertEqual(state['raw'],'cache:fixture-0')
         self.assertEqual(state['time'],30)
         self.assertIn('error:',state['site'])
 
-    def test_initial_readiness_waits_for_true_duration(self):
+    def test_initial_readiness_is_delivered_with_native_values(self):
         self.start_track()
         self.run_js('natives[0].complete(3);')
-        state=self.run_js('engineReady(audio,0);')
-        self.assertEqual(state['site'],[])
-        self.assertEqual(state['duration'],0)
-        state=self.run_js('audio._duration=90.07;advance(40);')
+        state=self.run_js('engineReady(audio,90.07);')
         self.assertEqual(state['site'],['canplaythrough:90.07'])
+        self.assertEqual(state['duration'],90.07)
 
     def test_same_source_load_uses_same_copy(self):
         self.copy_playing()
         state=self.run_js('audio.src=CDN;audio.load();')
         self.assertEqual(state['natives'],1)
-        self.assertEqual(state['raw'],'blob:fixture-0')
+        self.assertEqual(state['raw'],'cache:fixture-0')
         self.assertEqual(state['revoked'],[])
 
     def test_initial_copy_loading_has_one_recovery_owner(self):
@@ -261,7 +258,7 @@ class BufferedPlaybackTests(unittest.TestCase):
         self.start_track()
         self.run_js('natives[0].complete(3);')
         state=self.run_js('advance(2100);')
-        self.assertEqual(state['raw'],'blob:fixture-0')
+        self.assertEqual(state['raw'],'cache:fixture-0')
         self.assertEqual(state['revoked'],[])
 
     def test_sources_set_outside_the_js_setter_are_recognized(self):
@@ -273,7 +270,7 @@ class BufferedPlaybackTests(unittest.TestCase):
         self.copy_playing()
         state=self.run_js('audio._src="https://m10.music.126.net/two.mp3";audio.load();')
         self.assertEqual(state['natives'],2)
-        self.assertEqual(state['revoked'],['blob:fixture-0'])
+        self.assertEqual(state['revoked'],['cache:fixture-0'])
 
     def test_unrelated_sources_and_empty_probes_use_native_methods(self):
         state=self.run_js('audio.src="https://example.com/a.mp3";audio.load();audio.play();')
@@ -284,7 +281,7 @@ class BufferedPlaybackTests(unittest.TestCase):
         self.copy_playing()
         self.run_js('const second=new HTMLMediaElement();second.src="https://m10.music.126.net/two.mp3";')
         state=self.run_js('pageListeners.pagehide({persisted:false});')
-        self.assertEqual(state['revoked'],['blob:fixture-0'])
+        self.assertEqual(state['revoked'],['cache:fixture-0'])
         self.assertTrue(state['aborted'][1])
 
     def test_failed_initial_copy_keeps_play_pending_until_stream_starts(self):
