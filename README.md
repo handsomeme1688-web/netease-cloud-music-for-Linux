@@ -16,7 +16,7 @@
 在 Debian/Ubuntu 桌面打开终端，切换到安装包所在目录后运行：
 
 ```sh
-sudo apt install ./netease-cloud-music-webkit_1.0.6_all.deb
+sudo apt install ./netease-cloud-music-webkit_1.0.9_all.deb
 ```
 
 APT 会根据本机发行版和架构解析安装包声明的全部依赖，并选择仓库可用的 WebKitGTK 接口。安装完成后，在应用菜单中搜索“网易云音乐”，或在终端执行：
