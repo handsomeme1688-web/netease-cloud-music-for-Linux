@@ -7,6 +7,8 @@ import gi
 from gi.repository import Gio, GLib
 
 MAX_BYTES = 64 * 1024 * 1024
+# Bound each base64 decode on the page thread so controls remain responsive.
+CHUNK_BYTES = 64 * 1024
 
 
 def audio_uri(value):
@@ -137,11 +139,12 @@ class AudioBuffer:
         if not (job['mime'].startswith('audio/') or job['mime'] in ('application/octet-stream', 'application/ogg')):
             self.fail(job)
             return
-        self.read(job)
+        # The page uses the announced length to decide how long to wait.
+        self.send(job['id'], 'head', {'bytes': job['declared']}, lambda: self.read(job))
 
     def read(self, job):
         if self.active(job):
-            job['stream'].read_bytes_async(65536, GLib.PRIORITY_DEFAULT, job['cancel'], self.received, job)
+            job['stream'].read_bytes_async(CHUNK_BYTES, GLib.PRIORITY_DEFAULT, job['cancel'], self.received, job)
 
     def received(self, stream, result, job):
         try:

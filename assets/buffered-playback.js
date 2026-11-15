@@ -1,183 +1,297 @@
-/* Decode complete music responses instead of repeatedly seeking remote ranges. */
+/* Select one complete copy or one stream before loading a track. Keep the
+ * browser's media clock, state and events intact throughout playback. */
 (function () {
     'use strict';
     if (location.origin !== 'https://music.163.com' ||
         location.pathname.replace(/\/$/, '') !== '/st/webplayer' ||
-        typeof fetch !== 'function' || typeof AbortController !== 'function') return;
-    const limit = 64 * 1024 * 1024;
+        typeof AbortController !== 'function') return;
+    const LIMIT = 64 * 1024 * 1024;
+    const WAIT = 4000;
     const states = new WeakMap();
-    const cached = new Set();
-    const pending = new Set();
-    const nativePlay = HTMLMediaElement.prototype.play;
-    const nativePause = HTMLMediaElement.prototype.pause;
-    const nativeLoad = HTMLMediaElement.prototype.load;
-    const sourceProperty = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'src');
-    const currentProperty = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentSrc');
-    const actualSource = audio => sourceProperty ? sourceProperty.get.call(audio) : audio.src;
-    const setSource = (audio, value) => sourceProperty ? sourceProperty.set.call(audio, value) : (audio.src = value);
-    const cancelled = () => new DOMException('Playback was cancelled', 'AbortError');
+    // Includes downloads, not just completed copies. Selected copies stay pinned
+    // until the site replaces their source, even if the element is paused.
+    const entries = new Set();
+    const waiting = new Set();
+    const proto = HTMLMediaElement.prototype;
+    const nativePlay = proto.play, nativePause = proto.pause, nativeLoad = proto.load;
+    const source = Object.getOwnPropertyDescriptor(proto, 'src');
+    const currentSource = Object.getOwnPropertyDescriptor(proto, 'currentSrc');
+    const rawSource = audio => source.get.call(audio);
+    const setSource = (audio, value) => source.set.call(audio, value);
     const notify = (event, data = {}) => {
         const handlers = window.webkit && window.webkit.messageHandlers;
         if (handlers && handlers.playbackRecovery)
             handlers.playbackRecovery.postMessage(JSON.stringify(Object.assign({event}, data)));
     };
-    const eligible = source => {
+    const eligible = value => {
         try {
-            const uri = new URL(source);
+            const uri = new URL(value);
             return (uri.protocol === 'https:' || uri.protocol === 'http:') &&
                 uri.hostname.endsWith('.music.126.net');
         } catch (_) { return false; }
     };
+    const current = state => states.get(state.audio) === state;
+    const aborted = () => new DOMException('Audio request cancelled', 'AbortError');
+    const rejectWaiting = state => {
+        for (const waiter of state.waiters.splice(0)) waiter.reject(aborted());
+        for (const cancel of Array.from(state.replays)) cancel();
+    };
     const release = state => {
-        cached.delete(state);
-        if (state.objectURL) {
-            state.retiredURL = state.objectURL;
-            URL.revokeObjectURL(state.objectURL);
-            state.objectURL = null;
-        }
+        entries.delete(state);
+        state.reserved = 0;
+        if (state.objectURL) URL.revokeObjectURL(state.objectURL);
+        state.objectURL = null;
     };
-    const stateFor = audio => {
-        let state = states.get(audio);
-        let source = audio.src || audio.currentSrc || '';
-        if (state && (source === state.objectURL || source === state.retiredURL)) source = state.source;
-        if (state && source === state.source) return state;
-        if (state) {
-            state.intent++;
-            if (state.controller) state.controller.abort();
-            release(state);
-        }
-        if (!eligible(source)) return null;
-        state = {audio: audio, source: source, intent: 0, wanted: false,
-            objectURL: null, retiredURL: null, controller: null, promise: null,
-            size: 0, fallback: false};
-        states.set(audio, state);
-        return state;
+    const clearReady = state => {
+        clearInterval(state.readyTimer);
+        state.readyTimer = 0;
+        state.deferred.length = 0;
     };
-    const prepare = state => {
-        if (state.promise) return state.promise;
-        if (state.objectURL || state.fallback) return Promise.resolve();
-        if (actualSource(state.audio) === state.retiredURL) setSource(state.audio, state.source);
-        const controller = new AbortController();
-        pending.add(controller);
-        state.controller = controller;
-        const timeout = setTimeout(() => controller.abort(), 20000);
-        const current = () => states.get(state.audio) === state &&
-            (state.audio.src === state.source || state.audio.src === state.objectURL);
-        state.promise = (async () => {
-            // No credentials or range manipulation: use the site's authorized URL
-            // and its CORS policy, through the existing WebKit network settings.
+    const cancelDownload = state => {
+        clearTimeout(state.timer);
+        waiting.delete(state);
+        if (state.controller) state.controller.abort();
+    };
+    const discard = state => {
+        state.epoch++;
+        clearTimeout(state.transitionTimer);
+        cancelDownload(state);
+        clearReady(state);
+        rejectWaiting(state);
+        release(state);
+        states.delete(state.audio);
+    };
+    const reserve = (state, amount) => {
+        if (!current(state) || state.mode !== 'waiting') throw aborted();
+        const total = Array.from(entries).reduce((sum, item) => sum + item.reserved, 0);
+        const extra = Math.max(0, amount - state.reserved);
+        if ((!entries.has(state) && entries.size >= 2) || total + extra > LIMIT)
+            throw new Error('Audio cache is full');
+        entries.add(state);
+        state.reserved += extra;
+    };
+    const invokePlay = state => {
+        const epoch = state.epoch, resource = state.resource;
+        const result = nativePlay.call(state.audio);
+        if (!result || !result.catch) return result;
+        return result.catch(error => {
+            if (current(state) && state.epoch === epoch &&
+                state.resource !== resource && rawSource(state.audio) === state.resource) {
+                if (state.started && !state.audio.paused) return;
+                // A failed blob can leave a stale decoder error until the new
+                // resource reaches canplay. Do not immediately replay that error.
+                return new Promise((resolve, reject) => {
+                    let timer;
+                    const cleanup = () => {
+                        clearTimeout(timer);
+                        state.audio.removeEventListener('canplay', ready);
+                        state.replays.delete(cancel);
+                    };
+                    const cancel = () => { cleanup(); reject(aborted()); };
+                    const ready = () => {
+                        cleanup();
+                        if (!current(state) || state.epoch !== epoch) { reject(aborted()); return; }
+                        state.transitioning = false;
+                        try { resolve(nativePlay.call(state.audio)); } catch (error) { reject(error); }
+                    };
+                    state.replays.add(cancel);
+                    state.audio.addEventListener('canplay', ready);
+                    timer = setTimeout(() => { cleanup(); state.transitioning = false; reject(error); }, 12000);
+                    if (state.audio.readyState >= 3 && !state.audio.error) ready();
+                });
+            }
+            throw error;
+        });
+    };
+    const startWaitingPlay = state => {
+        const waiters = state.waiters.splice(0);
+        if (!waiters.length) return;
+        try {
+            Promise.resolve(invokePlay(state)).then(
+                () => waiters.forEach(waiter => waiter.resolve()),
+                error => waiters.forEach(waiter => waiter.reject(error)));
+        } catch (error) { waiters.forEach(waiter => waiter.reject(error)); }
+    };
+    const select = (state, mode, reason) => {
+        if (!current(state) || state.mode !== 'waiting') return;
+        state.mode = mode;
+        cancelDownload(state);
+        if (mode === 'stream') release(state);
+        state.resource = mode === 'copy' ? state.objectURL : state.source;
+        notify(mode === 'copy' ? 'copy-start' : 'stream-start', {reason});
+        setSource(state.audio, state.resource);
+        nativeLoad.call(state.audio);
+        startWaitingPlay(state);
+    };
+    const fallback = (state, reason) => {
+        if (!current(state)) return;
+        if (state.mode === 'waiting') { select(state, 'stream', reason); return; }
+        // A blob that cannot start may fall back once. Never replace a source
+        // after it has played: a reload would invalidate the site's seek state.
+        if (state.mode !== 'copy' || state.started || state.audio.currentTime > 0) return;
+        clearReady(state);
+        state.mode = 'stream';
+        state.transitioning = true;
+        state.transitionTimer = setTimeout(() => { state.transitioning = false; }, 12000);
+        state.resource = state.source;
+        setSource(state.audio, state.resource);
+        nativeLoad.call(state.audio);
+        release(state);
+        notify('stream-start', {reason});
+        startWaitingPlay(state);
+    };
+    const guarded = new WeakSet();
+    const readyEvents = ['durationchange', 'loadedmetadata', 'loadeddata', 'canplay', 'canplaythrough'];
+    const protect = audio => {
+        if (guarded.has(audio)) return;
+        guarded.add(audio);
+        audio.addEventListener('playing', () => {
+            const state = states.get(audio);
+            if (state) {
+                state.started = true;
+                state.transitioning = false;
+                clearTimeout(state.transitionTimer);
+            }
+        }, true);
+        audio.addEventListener('error', event => {
+            const state = states.get(audio);
+            if (event.isTrusted && state && state.mode === 'copy' && !state.started && audio.currentTime === 0) {
+                event.stopImmediatePropagation();
+                fallback(state, 'copy-unavailable');
+            }
+        }, true);
+        for (const type of readyEvents) audio.addEventListener(type, event => {
+            const state = states.get(audio);
+            if (!event.isTrusted || !state || state.mode !== 'copy') return;
+            if (audio.duration > 0) { startWaitingPlay(state); return; }
+            // Some WebKit versions signal readiness before knowing MP3 duration.
+            // Delay only those initial events; never replace media properties.
+            event.stopImmediatePropagation();
+            if (!state.deferred.includes(type)) state.deferred.push(type);
+            if (state.readyTimer) return;
+            const since = performance.now();
+            state.readyTimer = setInterval(() => {
+                if (!current(state)) { clearReady(state); return; }
+                if (!(audio.duration > 0 && Number.isFinite(audio.duration))) {
+                    if (performance.now() - since >= 2000) fallback(state, 'unknown-duration');
+                    return;
+                }
+                clearInterval(state.readyTimer);
+                state.readyTimer = 0;
+                startWaitingPlay(state);
+                for (const name of state.deferred.splice(0)) audio.dispatchEvent(new Event(name));
+            }, 20);
+        }, true);
+    };
+    const prepare = async state => {
+        const controller = state.controller;
+        try {
+            reserve(state, 0);
+            const progress = (received, total) => {
+                try { reserve(state, Math.max(received, total)); }
+                catch (_) { fallback(state, 'cache-limit'); }
+            };
             const response = window.__musicFetchNativeAudio ?
-                await window.__musicFetchNativeAudio(state.source, controller.signal) :
-                await fetch(state.source, {cache: 'reload', signal: controller.signal});
-            notify('buffer-response', {status: response.status});
+                await window.__musicFetchNativeAudio(state.source, controller.signal, progress) :
+                await fetch(state.source, {cache: 'no-store', signal: controller.signal});
+            if (!current(state) || state.mode !== 'waiting') return;
             if (response.status !== 200 || !response.body || !response.body.getReader)
-                throw new Error('A complete response is unavailable');
+                throw new Error('Complete audio unavailable');
             const declared = Number(response.headers.get('Content-Length'));
-            if (declared > limit) throw new Error('Audio exceeds the memory limit');
+            reserve(state, Number.isFinite(declared) && declared > 0 ? declared : 0);
             const reader = response.body.getReader();
             const chunks = [];
-            let size = 0;
+            let bytes = 0;
             try {
                 for (;;) {
                     const chunk = await reader.read();
                     if (chunk.done) break;
-                    size += chunk.value.byteLength;
-                    if (size > limit) throw new Error('Audio exceeds the memory limit');
+                    bytes += chunk.value.byteLength;
+                    reserve(state, bytes);
                     chunks.push(chunk.value);
                 }
-            } catch (error) {
-                await reader.cancel().catch(() => {});
-                throw error;
-            }
-            if (!size || (declared > 0 && size !== declared)) throw new Error('Incomplete audio');
-            if (!current()) throw cancelled();
-            let used = Array.from(cached).reduce((total, item) => total + item.size, 0);
-            for (const old of Array.from(cached)) {
-                if (cached.size < 2 && used + size <= limit) break;
-                if (old.audio.paused || old.audio.ended) { used -= old.size; release(old); }
-            }
-            if (cached.size >= 2 || used + size > limit) throw new Error('Audio cache is full');
-            state.objectURL = URL.createObjectURL(new Blob(chunks, {
-                type: response.headers.get('Content-Type') || 'audio/mpeg'}));
-            state.size = size;
-            notify('buffer-ready', {bytes: size});
-            cached.add(state);
-        })().catch(error => {
-            controller.abort();
-            if (!current()) throw cancelled();
-            notify('buffer-fallback', {name: error.name});
-            // A failed, unsupported or oversized full fetch keeps the normal
-            // streaming path. Never change website authentication or TLS policy.
-            state.fallback = true;
-        }).finally(() => {
-            clearTimeout(timeout);
-            pending.delete(controller);
-            state.controller = null;
-            state.promise = null;
-        });
-        return state.promise;
+            } catch (error) { await reader.cancel().catch(() => {}); throw error; }
+            if (!bytes || (declared > 0 && declared !== bytes)) throw new Error('Truncated audio');
+            if (!current(state) || state.mode !== 'waiting') return;
+            const blob = new Blob(chunks, {type: response.headers.get('Content-Type') || 'audio/mpeg'});
+            state.objectURL = URL.createObjectURL(blob);
+            notify('buffer-ready', {bytes});
+            select(state, 'copy', 'complete');
+        } catch (error) {
+            if (current(state) && state.mode === 'waiting') fallback(state, 'unavailable');
+        }
     };
-    HTMLMediaElement.prototype.load = function () {
-        const state = stateFor(this);
-        if (!state) return nativeLoad.apply(this, arguments);
-        state.intent++;
-        state.wanted = false;
-        if (state.objectURL) setSource(this, state.objectURL);
-        else if (!state.fallback) prepare(state).catch(() => {});
-        return nativeLoad.apply(this, arguments);
+    const hold = (audio, value) => {
+        const state = {audio, source: value, mode: 'waiting', resource: '', objectURL: null,
+            reserved: 0, started: false, transitioning: false, epoch: 0, controller: new AbortController(),
+            waiters: [], replays: new Set(), deferred: [], readyTimer: 0, transitionTimer: 0, timer: 0};
+        states.set(audio, state);
+        waiting.add(state);
+        protect(audio);
+        // Detach the previous song once; it must not continue during download.
+        if (rawSource(audio)) { audio.removeAttribute('src'); nativeLoad.call(audio); }
+        state.timer = setTimeout(() => fallback(state, 'timeout'), WAIT);
+        prepare(state);
     };
-    HTMLMediaElement.prototype.play = function () {
-        const state = stateFor(this);
-        if (!state) return nativePlay.apply(this, arguments);
-        state.wanted = true;
-        const args = arguments;
-        if (!state.objectURL && !state.fallback) prepare(state).catch(() => {});
-        return nativePlay.apply(this, args);
+    const synchronize = audio => {
+        let state = states.get(audio);
+        const raw = rawSource(audio);
+        if (state && raw !== state.resource) { discard(state); state = null; }
+        if (!state && eligible(raw)) { hold(audio, raw); state = states.get(audio); }
+        return state;
     };
-    HTMLMediaElement.prototype.pause = function () {
+    proto.play = function () {
+        const state = synchronize(this);
+        if (state && state.mode === 'waiting')
+            return new Promise((resolve, reject) => state.waiters.push({resolve, reject}));
+        return state ? invokePlay(state) : nativePlay.apply(this, arguments);
+    };
+    proto.pause = function () {
         const state = states.get(this);
-        if (state) { state.intent++; state.wanted = false; }
+        if (state) { state.epoch++; rejectWaiting(state); }
         return nativePause.apply(this, arguments);
     };
-    if (sourceProperty && currentProperty) {
-        // The site's player compares source URLs and otherwise reloads a track.
-        // Keep its requested URL visible while the native decoder reads the blob.
-        Object.defineProperty(HTMLMediaElement.prototype, 'src', {
-            configurable: sourceProperty.configurable, enumerable: sourceProperty.enumerable,
-            get: function () {
-                const source = sourceProperty.get.call(this), state = states.get(this);
-                return state && (source === state.objectURL || source === state.retiredURL) ? state.source : source;
-            },
-            set: function (value) {
-                const state = states.get(this);
-                if (state && value === state.source) {
-                    sourceProperty.set.call(this, state.objectURL || value);
-                    return;
-                }
-                if (state) {
-                    state.intent++;
-                    if (state.controller) state.controller.abort();
-                    release(state);
-                    states.delete(this);
-                }
-                sourceProperty.set.call(this, value);
+    proto.load = function () {
+        const state = synchronize(this);
+        if (state) state.epoch++;
+        if (state && state.mode === 'waiting') { rejectWaiting(state); return; }
+        return nativeLoad.apply(this, arguments);
+    };
+    Object.defineProperty(proto, 'src', {
+        configurable: source.configurable, enumerable: source.enumerable,
+        get: function () {
+            const state = states.get(this), raw = rawSource(this);
+            return state && raw === state.resource ? state.source : raw;
+        },
+        set: function (value) {
+            const state = states.get(this);
+            if (state && value === state.source) {
+                if (state.mode !== 'waiting') setSource(this, state.resource);
+                return;
             }
-        });
-        Object.defineProperty(HTMLMediaElement.prototype, 'currentSrc', {
-            configurable: currentProperty.configurable, enumerable: currentProperty.enumerable,
-            get: function () {
-                const source = currentProperty.get.call(this), state = states.get(this);
-                return state && (source === state.objectURL || source === state.retiredURL) ? state.source : source;
-            }
-        });
-    }
+            if (state) discard(state);
+            if (typeof value === 'string' && eligible(value)) hold(this, value);
+            else setSource(this, value);
+        }
+    });
+    Object.defineProperty(proto, 'currentSrc', {
+        configurable: currentSource.configurable, enumerable: currentSource.enumerable,
+        get: function () {
+            const state = states.get(this), raw = currentSource.get.call(this);
+            return state && raw === state.objectURL ? state.source : raw;
+        }
+    });
     Object.defineProperty(window, '__musicHasCompleteAudio', {value: audio => {
         const state = states.get(audio);
-        return !!(state && state.objectURL && audio.src === state.source);
+        return !!(state && state.mode === 'copy' && rawSource(audio) === state.objectURL);
+    }});
+    Object.defineProperty(window, '__musicPlaybackManaged', {value: audio => {
+        const state = states.get(audio);
+        return !!(state && (state.mode === 'waiting' || state.transitioning));
     }});
     window.addEventListener('pagehide', event => {
         if (event.persisted) return;
-        for (const controller of pending) controller.abort();
-        for (const state of cached) release(state);
+        for (const state of Array.from(waiting)) discard(state);
+        for (const state of Array.from(entries)) discard(state);
     });
 })();

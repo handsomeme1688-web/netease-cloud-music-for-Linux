@@ -29,7 +29,7 @@ const tick = milliseconds => {
 const window = {webkit: {messageHandlers: {playbackRecovery: {postMessage: value => messages.push(JSON.parse(value).event)}}},
  addEventListener: (event, callback) => {pageListeners[event] = callback;}};
 class HTMLMediaElement {
- constructor() {this.src='track-one';this.currentSrc=this.src;this.currentTime=0;this.readyState=4;
+ constructor() {this.src='track-one';this.currentSrc=this.src;this.currentTime=0;this.readyState=2;
   this.paused=true;this.ended=false;this.seeking=false;this.error=null;this.playCalls=0;this.loadCalls=0;
   this.listeners=new Map();this.deferred=false;this.pending=[];}
  addEventListener(event, callback) {if(!this.listeners.has(event))this.listeners.set(event,new Set());this.listeners.get(event).add(callback);}
@@ -98,7 +98,7 @@ class StalledPlaybackTests(unittest.TestCase):
                 self.assertEqual(state['plays'], 1)
 
     def test_retries_are_bounded_for_one_source(self):
-        state = self.snapshot('audio.play();tick(15000);audio.ready();tick(15000);audio.ready();tick(15000);tick(60000)')
+        state = self.snapshot('audio.play();tick(15000);audio.ready();audio.readyState=2;tick(15000);audio.ready();audio.readyState=2;tick(15000);tick(60000)')
         self.assertEqual(state['loads'], 2)
         self.assertEqual(state['plays'], 3)
         self.assertEqual(state['messages'].count('failed'), 1)
@@ -161,6 +161,26 @@ class StalledPlaybackTests(unittest.TestCase):
         state = self.snapshot("audio.play();pageListeners.pagehide();pageListeners.pageshow();audio.play();tick(15000);audio.ready()")
         self.assertEqual(state['loads'], 1)
         self.assertEqual(state['plays'], 3)
+
+    def test_stale_clock_with_available_data_does_not_reload(self):
+        state = self.snapshot('audio.play();audio.readyState=4;tick(60000)')
+        self.assertEqual(state['loads'], 0)
+        self.assertNotIn('retry', state['messages'])
+
+    def test_recovery_waits_for_seek_completion_before_playing(self):
+        self.evaluate("audio.play();audio.currentTime=42;tick(1000);tick(15000);Object.defineProperty(audio,'currentTime',{get:()=>audio._time||0,set:value=>{audio._time=value;audio.seeking=true;}})")
+        state = self.snapshot('audio.ready()')
+        self.assertEqual(state['plays'], 1)
+        self.assertTrue(state['paused'])
+        state = self.snapshot("audio.seeking=false;audio.emit('seeked')")
+        self.assertEqual(state['plays'], 2)
+        self.assertEqual(state['position'], 42)
+
+    def test_pause_while_recovery_seek_pending_never_resumes(self):
+        self.evaluate("audio.play();audio.currentTime=42;tick(1000);tick(15000);audio.seeking=true;audio.ready();audio.pause()")
+        state = self.snapshot("audio.seeking=false;audio.emit('seeked');tick(15000)")
+        self.assertEqual(state['plays'], 1)
+        self.assertTrue(state['paused'])
 
 
 class PlaybackPolicyTests(unittest.TestCase):

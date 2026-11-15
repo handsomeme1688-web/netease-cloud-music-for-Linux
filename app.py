@@ -8,14 +8,16 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import weakref
 from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.0.6"
+VERSION = "1.0.8"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
+PLAYBACK_LOG_LIMIT = 2 * 1024 * 1024
 
 if sys.version_info < (3, 8):
     print("需要 Python 3.8 或更新版本。", file=sys.stderr)
@@ -441,6 +443,21 @@ class MusicApplication(Gtk.Application):
         window = self.get_active_window()
         if window:
             window.message("下载失败", error.message)
+
+    def log_playback(self, message):
+        """Keep a small local record of playback decisions for troubleshooting.
+
+        Messages contain events, positions and sizes only, never addresses or
+        account data. The file is replaced once it reaches its size limit."""
+        path = self.cache_dir / "playback.log"
+        try:
+            if path.exists() and path.stat().st_size > PLAYBACK_LOG_LIMIT:
+                path.replace(path.with_name("playback.log.1"))
+            with path.open("a", encoding="utf-8") as stream:
+                record = dict(message, at=round(time.time(), 2))
+                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except (OSError, TypeError, ValueError):
+            pass
 
     def save_state(self, window):
         width, height = window.normal_size
@@ -958,6 +975,7 @@ class MusicWindow(Gtk.ApplicationWindow):
             return
         if not isinstance(message, dict):
             return
+        self.app.log_playback(message)
         if message.get("event") == "failed":
             self.playback_notice.show_all()
             self.playback_notice.show()

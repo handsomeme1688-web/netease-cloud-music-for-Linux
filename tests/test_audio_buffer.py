@@ -59,10 +59,15 @@ class AudioBufferTests(unittest.TestCase):
                 pass
 
         loop = GLib.MainLoop()
-        chunks, outcomes = [], []
+        chunks, outcomes, heads = [], [], []
 
         def deliver(identifier, event, data, continuation=None):
-            if event == 'chunk':
+            if event == 'head':
+                # The page learns the length first, before any audio data.
+                self.assertEqual(chunks, [])
+                heads.append(data)
+                continuation()
+            elif event == 'chunk':
                 chunks.append(base64.b64decode(data['data']))
                 continuation()
             else:
@@ -86,6 +91,7 @@ class AudioBufferTests(unittest.TestCase):
                     'http://127.0.0.1:%d/fixture.mp3' % server.server_port)):
                 self.buffer.request('fixture-1', 'https://m10.music.126.net/fixture.mp3')
             loop.run()
+            self.assertEqual(heads, [{'bytes': len(payload)}])
             self.assertEqual(outcomes, [('complete', {'bytes': len(payload), 'mime': 'audio/mpeg'})])
             self.assertEqual(b''.join(chunks), payload)
             self.assertEqual(requests, [('/fixture.mp3', 'https://music.163.com/')])

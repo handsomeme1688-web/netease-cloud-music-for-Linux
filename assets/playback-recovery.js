@@ -18,6 +18,8 @@
     const cancelRecovery = (audio, state) => {
         clearTimeout(state.timeout);
         if (state.resume) audio.removeEventListener("canplay", state.resume);
+        if (state.seekResume) audio.removeEventListener("seeked", state.seekResume);
+        state.seekResume = null;
         state.resume = null;
         state.timeout = null;
         state.recovering = false;
@@ -52,6 +54,7 @@
             if (!state.wanted && !state.recovering) active.delete(audio);
         });
         audio.addEventListener("pause", () => {
+            if (window.__musicPlaybackManaged && window.__musicPlaybackManaged(audio)) return;
             if (!state.recovering && !state.loading) stop(audio, state);
         });
         audio.addEventListener("ended", () => stop(audio, state));
@@ -81,8 +84,6 @@
             state.resume = null;
             if (wanted && !state.wanted) return;
             try {
-                if (wanted && position > 0) audio.currentTime = position;
-                const result = wanted ? nativePlay.call(audio) : null;
                 const complete = () => {
                     if (state.generation !== generation) return;
                     for (const waiter of state.waiters.splice(0)) waiter.resolve();
@@ -92,8 +93,23 @@
                     state.position = audio.currentTime;
                     if (!state.wanted) active.delete(audio);
                 };
-                if (result && typeof result.then === "function") result.then(complete, fail);
-                else complete();
+                const play = () => {
+                    if (state.generation !== generation || !state.recovering) return;
+                    if (state.seekResume) audio.removeEventListener("seeked", state.seekResume);
+                    state.seekResume = null;
+                    try {
+                        const result = wanted && state.wanted ? nativePlay.call(audio) : null;
+                        if (result && typeof result.then === "function") result.then(complete, fail);
+                        else complete();
+                    } catch (_) { fail(); }
+                };
+                // Finish the real seek before restarting the media clock.
+                if (wanted && position > 0) {
+                    state.seekResume = play;
+                    audio.addEventListener("seeked", play);
+                    audio.currentTime = position;
+                    if (!audio.seeking) play();
+                } else play();
             } catch (_) {
                 fail();
             }
@@ -160,8 +176,20 @@
                 stop(audio, state);
                 continue;
             }
+            if (window.__musicPlaybackManaged && window.__musicPlaybackManaged(audio)) {
+                // The complete-copy switch handles this element's stalls faster.
+                state.position = audio.currentTime;
+                state.progress = now;
+                continue;
+            }
             if (Math.abs(audio.currentTime - state.position) > 0.05) {
                 state.position = audio.currentTime;
+                state.progress = now;
+                continue;
+            }
+            // A stale clock alone is not evidence that audible playback stopped.
+            // Only retry when data is actually unavailable or a seek is stuck.
+            if (!audio.seeking && audio.readyState >= 3) {
                 state.progress = now;
                 continue;
             }
