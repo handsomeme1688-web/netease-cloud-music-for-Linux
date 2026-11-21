@@ -23,8 +23,12 @@ const window={addEventListener:()=>{}},innerWidth=1280,innerHeight=840;
 const getComputedStyle=()=>({color:'rgb(40,40,40)',getPropertyValue:()=> 'rgb(40,40,40)'});
 class Element{
  constructor(tag){this.tagName=tag;this.children=[];this.dataset={};this.style={setProperty(name,value){this[name]=value;}};this.attrs={};this.events={};this.textContent='';this.disabled=false;}
- appendChild(node){this.children.push(node);node.parentNode=this;return node;}
- insertBefore(node){this.children.unshift(node);node.parentNode=this;}
+ insertBefore(node,before){
+  if(node.parentNode)node.parentNode.children.splice(node.parentNode.children.indexOf(node),1);
+  this.children.splice(before?this.children.indexOf(before):this.children.length,0,node);
+  node.parentNode=this;return node;
+ }
+ appendChild(node){return this.insertBefore(node,null);}
  get firstChild(){return this.children[0]||null;}
  closest(selector){for(let node=this;node;node=node.parentNode){
   if((node.className||'').split(' ').includes(selector.slice(1)))return node;
@@ -52,6 +56,7 @@ const document={head:new Element('head'),body:new Element('body'),activeElement:
 const bar=new Element('div');document.body.appendChild(bar);
 const settings=new Element('div');document.body.appendChild(settings);
 const detailBar=new Element('div');detailBar.className='vinyl-page-bar-wrapper';
+document.body.appendChild(detailBar);
 let detailVisible=false;
 class MutationObserver{constructor(fn){this.callback=fn;}observe(){}disconnect(){}}
 let state={host:{isPlusVip:true,isVinylVip:true,isAnonymous:false},configCenter:{},

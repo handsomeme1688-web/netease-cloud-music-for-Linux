@@ -4,19 +4,156 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import sys
+import tempfile
 import time
 import weakref
 from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.0.12"
+VERSION = "1.0.13"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 PLAYBACK_LOG_LIMIT = 2 * 1024 * 1024
+CACHE_SETTINGS_WORLD = "MusicCacheSettings"
+WINDOW_INTERACTION_WORLD = "MusicWindowInteraction"
+WINDOW_BUTTON_SIZE = 26
+WINDOW_BUTTON_PITCH = 30
+WINDOW_BUTTON_END = 16
+WINDOW_BUTTON_SPACING = WINDOW_BUTTON_PITCH - WINDOW_BUTTON_SIZE
+# The centre of the last web button is half a slot before the right padding.
+WINDOW_BUTTON_RESERVE = WINDOW_BUTTON_END + 3 * WINDOW_BUTTON_PITCH - WINDOW_BUTTON_SPACING / 2
+WINDOW_DEFAULT_SIZE = (1080, 720)
+WINDOW_MIN_SIZE = (800, 540)
+VIEWPORT_MIN_SIZE = (480, 320)
+COMPACT_WIDTH = 540
+COMPACT_BUTTON_CENTER = 22
+COMPACT_HEADER_INSET = COMPACT_BUTTON_CENTER + WINDOW_BUTTON_SIZE / 2 + 6
+PLAYER_LAYOUT = """
+section[class*="RightContainer_"] { flex: 1 1 0 !important; min-width: 0 !important; width: auto !important; }
+#page_pc_main_nav {
+    box-sizing: border-box !important;
+    padding-right: var(--music-window-controls-width) !important;
+}
+#page_pc_main_nav [class*="MiniModeIconBar_"] > :not(:empty):not([hidden]):not([style*="display: none"]) {
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 var(--music-window-button-pitch) !important;
+    width: var(--music-window-button-pitch) !important;
+    margin: 0 !important;
+}
+#page_pc_main_nav [class*="MiniModeIconBar_"] .icon { max-width: var(--music-window-button-pitch); }
+#topArea > .title { min-width: 0; }
+#topArea > .title > svg {
+    display: block !important;
+    height: 22px !important;
+    max-width: 100%;
+    overflow: visible;
+}
+#page_pc_setting #play {
+    --music-setting-font-size: 14px;
+    --music-setting-label-width: 7em;
+    --music-setting-control-height: 28px;
+    padding-top: 22px !important;
+    padding-bottom: 22px !important;
+}
+#page_pc_setting #play > .play > * { margin-top: 0 !important; margin-bottom: 18px !important; }
+#page_pc_setting #play > .play > :last-child { margin-bottom: 0 !important; }
+
+@media (max-width: 1200px) {
+    #page_pc_main_nav { padding-left: clamp(12px, 2vw, 40px) !important; }
+    #page_pc_main_nav [class*="HeaderRow_"] { display: flex !important; align-items: center; min-width: 0; }
+    #page_pc_main_nav [class*="HeaderRow_"] > :empty { display: none !important; }
+    #page_pc_main_nav [class*="HistoryIconBackground_"] { flex: none; margin-right: 8px; }
+    #page_pc_main_nav [class*="SearchWrapper_"] { flex: 0 1 258px; min-width: 48px; }
+    #page_pc_main_nav .searchbox { width: 100% !important; min-width: 0 !important; }
+    #page_pc_main_nav .searchbox input { min-width: 0 !important; }
+    #page_pc_main_nav [class*="Bar_b2jgnke"] { flex: 0 2 auto; min-width: 60px; margin: 0 8px 0 auto !important; }
+    #page_pc_main_nav [class*="Bar_b2jgnke"] > * { min-width: 0; }
+    #page_pc_main_nav [class*="Bar_b2jgnke"] > :first-child,
+    #page_pc_main_nav [class*="Bar_b2jgnke"] > :last-child { flex: none; }
+    #page_pc_main_nav [class*="Bar_b2jgnke"] > :nth-child(3):not(:last-child) { overflow: hidden; }
+    #page_pc_main_nav [class*="Name_"] { max-width: 120px; }
+    #page_pc_setting section[id] > :not(h3) { flex: 1 1 auto; min-width: 0; max-width: 100%; }
+    #page_pc_setting .option { flex-wrap: wrap; }
+    #page_pc_setting .option > .option-item { margin: 4px 0 4px 16px !important; }
+    #page_pc_setting .web-about .link { display: inline-block; line-height: 1.6; }
+}
+
+@media (max-width: 820px) {
+    #page_pc_main_nav [class*="Bar_b2jgnke"] { min-width: 56px; }
+    #page_pc_main_nav [class*="Bar_b2jgnke"] > :nth-child(3):not(:last-child) { display: none !important; }
+    #page_pc_setting { padding-left: 16px !important; padding-right: 16px !important; }
+    #page_pc_setting section[id] { flex-direction: column !important; }
+    #page_pc_setting section[id] > h3 { width: auto !important; margin-bottom: 12px !important; }
+    #page_pc_setting .cmd-anchor-link-wrapper { flex-wrap: wrap; }
+}
+
+@media (max-width: 720px) {
+    [class*="Container_c1udi5wp"] { min-width: 0 !important; width: clamp(100px, 25vw, 180px); }
+    [class*="Container_c1udi5wp"] > [class*="BackContainer_"] { width: 100% !important; }
+
+    #page_pc_mini_bar [class*="BarWrapper_"] {
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) auto;
+        min-height: 80px;
+        height: auto !important;
+        padding: 4px 12px !important;
+    }
+    #page_pc_mini_bar [class*="BarWrapper_"] .side,
+    #page_pc_mini_bar [class*="BarWrapper_"] .left,
+    #page_pc_mini_bar [class*="BarWrapper_"] .right {
+        width: auto !important;
+        min-width: 0;
+        height: auto !important;
+    }
+    #page_pc_mini_bar [class*="BarWrapper_"] .middle {
+        grid-column: 1 / -1;
+        grid-row: 2;
+        width: 100% !important;
+        min-width: 0;
+    }
+    #page_pc_mini_bar [class*="DefaultBarWrapper_"] .middle .btns { padding-top: 0 !important; }
+    #page_pc_mini_bar .vinyl-page-bar-wrapper .middle { height: 40px !important; }
+    #page_pc_mini_bar .vinyl-page-bar-wrapper .left { flex-wrap: wrap; }
+    #page_pc_mini_bar .right-side .right { flex-wrap: wrap; justify-content: flex-end; }
+
+    [class*="VinylPageLayoutContainer_"] {
+        flex-direction: column;
+        overflow-y: auto;
+        box-sizing: border-box;
+        padding: 48px 12px 94px;
+    }
+    [class*="VinylPageLayoutContainer_"] > .side,
+    [class*="VinylPageLayoutContainer_"] > .center { display: none; }
+    [class*="VinylPageLayoutContainer_"] > .vinyl { flex: none; max-width: 100%; }
+    [class*="VinylPageLayoutContainer_"] > .display {
+        flex: none;
+        width: 100% !important;
+        min-height: 200px;
+        height: auto !important;
+        padding: 12px 0 !important;
+    }
+}
+
+@media (max-width: 540px) {
+    #page_pc_main_nav {
+        flex: none;
+        height: auto !important;
+        padding: var(--music-window-compact-inset) 10px 8px !important;
+    }
+    #page_pc_main_nav [class*="HeaderRow_"] { flex-wrap: wrap; row-gap: 4px; }
+    #page_pc_main_nav [class*="SearchWrapper_"] { flex: 1 1 96px; }
+    #page_pc_main_nav [class*="IconBar_"] { height: auto; }
+    [class*="LeftScrollContainer_"] .draggable { padding-left: 6px !important; }
+    [class*="AppScrollContainer_"] { overflow-x: auto !important; }
+}
+"""
 
 if sys.version_info < (3, 8):
     print("需要 Python 3.8 或更新版本。", file=sys.stderr)
@@ -77,6 +214,26 @@ def private_directory(base, fallback):
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.chmod(0o700)
     return path
+
+
+def opening_window_geometry(state, available):
+    # Leave room around the window, including on displays smaller than the usual minimum.
+    limits = tuple(max(1, length * 85 // 100) for length in available)
+    minimum = tuple(min(size, limit) for size, limit in zip(WINDOW_MIN_SIZE, limits))
+    saved = {} if state.get("maximized") else state
+    size = []
+    for key, default, low, high in zip(("width", "height"), WINDOW_DEFAULT_SIZE, minimum, limits):
+        value = saved.get(key, default)
+        if not isinstance(value, (int, float)) or (isinstance(value, float) and not math.isfinite(value)):
+            value = default
+        size.append(int(max(low, min(high, value))))
+    return minimum, tuple(size)
+
+
+def fit_page_zoom(preferred, size, scale):
+    limit = min(length / (minimum * scale) for length, minimum in zip(size, VIEWPORT_MIN_SIZE))
+    # Small steps prevent recreating the page layout for every pixel of a drag.
+    return max(0.5, min(preferred, math.floor(20 * limit + 0.001) / 20))
 
 
 def configure_direct_connection(manager, context):
@@ -167,6 +324,9 @@ class MusicApplication(Gtk.Application):
         self.data_dir = private_directory("XDG_DATA_HOME", ".local/share")
         self.cache_dir = private_directory("XDG_CACHE_HOME", ".cache")
         self.config_dir = private_directory("XDG_CONFIG_HOME", ".config")
+        self.default_audio_cache_directory = self.cache_dir / "audio"
+        self.audio_cache_config = self.config_dir / "audio-cache.json"
+        self.audio_cache_directory = self.load_audio_cache_directory()
         self.state_path = self.config_dir / "window.json"
         self.state = {}
         try:
@@ -209,6 +369,7 @@ class MusicApplication(Gtk.Application):
         self._recovering_player = True
         self.hold()
         try:
+            maximized = self.main_window.is_maximized()
             self.system_media.reset()
             self.save_state(self.main_window)
             self.stop_login_watch()
@@ -220,6 +381,8 @@ class MusicApplication(Gtk.Application):
             self.main_window = None
             self.create_web_context()
             self.do_activate()
+            if maximized:
+                self.main_window.maximize()
         finally:
             self._recovering_player = False
             self.release()
@@ -415,10 +578,32 @@ class MusicApplication(Gtk.Application):
         except (OSError, TypeError, ValueError):
             pass
 
+    def load_audio_cache_directory(self):
+        try:
+            path = Path(json.loads(self.audio_cache_config.read_text(encoding="utf-8")))
+            if path.is_absolute() and "\0" not in str(path):
+                return path
+        except (OSError, TypeError, ValueError):
+            pass
+        return self.default_audio_cache_directory
+
+    def save_audio_cache_directory(self, path):
+        if path.is_symlink():
+            raise OSError("缓存子目录指向符号链接")
+        path.mkdir(mode=0o700, exist_ok=True)
+        with tempfile.TemporaryFile(dir=path):
+            pass
+        if path == self.default_audio_cache_directory:
+            self.audio_cache_config.unlink(missing_ok=True)
+        else:
+            temp = self.audio_cache_config.with_suffix(".tmp")
+            temp.write_text(json.dumps(str(path)), encoding="utf-8")
+            temp.replace(self.audio_cache_config)
+        self.audio_cache_directory = path
+
     def save_state(self, window):
         width, height = window.normal_size
-        self.state = {"width": width, "height": height,
-                      "maximized": window.is_maximized(), "zoom": window.webview.get_zoom_level()}
+        self.state = {"width": width, "height": height, "zoom": window.requested_zoom}
         try:
             temp = self.state_path.with_suffix(".tmp")
             temp.write_text(json.dumps(self.state), encoding="utf-8")
@@ -435,16 +620,18 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.is_popup = related_view is not None
         self.set_role(APP_ID)
         self.set_wmclass(APP_ID, APP_ID)
-        self.set_size_request(640, 480)
+        display = self.get_display()
+        monitor = display.get_primary_monitor() or display.get_monitor(0)
+        workarea = monitor.get_workarea() if monitor else None
+        available = ((workarea.width, workarea.height)
+                     if workarea and min(workarea.width, workarea.height) > 0 else (7680, 4320))
         state = {} if self.is_popup else app.state
+        minimum, self.normal_size = opening_window_geometry(state, available)
+        self.set_size_request(*minimum)
         def number(key, default, low, high):
             value = state.get(key, default)
             return max(low, min(high, value)) if isinstance(value, (int, float)) else default
-        self.normal_size = (int(number("width", 1280, 640, 3840)),
-                            int(number("height", 840, 480, 2160)))
         self.set_default_size(*self.normal_size)
-        if state.get("maximized"):
-            self.maximize()
 
         self.set_decorated(False)
 
@@ -487,7 +674,23 @@ class MusicWindow(Gtk.ApplicationWindow):
                 WebKit2.UserContentInjectedFrames.TOP_FRAME,
                 WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/*"], None))
             manager = self.webview.get_user_content_manager()
-            self.audio_buffer = AudioCache(WEBKIT_API, self.deliver_native_audio, app.cache_dir / "audio")
+            manager.register_script_message_handler_in_world("windowDragGap", WINDOW_INTERACTION_WORLD)
+            manager.connect("script-message-received::windowDragGap", self.drag_gap_message)
+            interaction_script = Path(__file__).resolve().parent / "assets" / "window-interaction.js"
+            manager.add_script(WebKit2.UserScript.new_for_world(
+                interaction_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                WebKit2.UserScriptInjectionTime.END, WINDOW_INTERACTION_WORLD,
+                ["https://music.163.com/st/webplayer*"], None))
+            self.audio_buffer = AudioCache(WEBKIT_API, self.deliver_native_audio,
+                                           app.audio_cache_directory)
+            self.cache_chooser = None
+            manager.register_script_message_handler_in_world("cacheSettings", CACHE_SETTINGS_WORLD)
+            manager.connect("script-message-received::cacheSettings", self.cache_settings_message)
+            cache_script = Path(__file__).resolve().parent / "assets" / "cache-settings.js"
+            manager.add_script(WebKit2.UserScript.new_for_world(
+                cache_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                WebKit2.UserScriptInjectionTime.END, CACHE_SETTINGS_WORLD,
+                ["https://music.163.com/st/webplayer*"], None))
             self.stream_player = StreamPlayer(self.audio_buffer, self.deliver_stream)
             manager.register_script_message_handler("streamPlayer")
             manager.connect("script-message-received::streamPlayer", self.stream_message)
@@ -543,7 +746,12 @@ class MusicWindow(Gtk.ApplicationWindow):
                 manager.add_script(WebKit2.UserScript.new(
                     media_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
                     WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/st/webplayer*"], None))
-        self.webview.set_zoom_level(number("zoom", 1.0, 0.5, 2.0))
+        self.requested_zoom = number("zoom", 1.0, 0.5, 2.0)
+        self.viewport_size = self.normal_size
+        self.page_scale = 1.0
+        self.viewport_timer = 0
+        self.compact_header = None
+        self.webview.set_zoom_level(fit_page_zoom(self.requested_zoom, self.viewport_size, self.page_scale))
         self.webview.connect("load-changed", self.load_changed)
         self.webview.connect("load-failed", self.load_failed)
         self.webview.connect("load-failed-with-tls-errors", self.tls_failed)
@@ -595,6 +803,9 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.create_window_interaction()
         self.header_style = None
         self.webview.connect("notify::zoom-level", self.sync_page_controls)
+        self.webview.connect("notify::scale-factor", self.sync_page_controls)
+        self.webview.connect("size-allocate", self.viewport_size_changed)
+        self.connect("destroy", self.cancel_viewport_fit)
         self.sync_page_controls()
         self.connect("key-press-event", self.key_press)
         self.connect("configure-event", self.configure)
@@ -606,15 +817,16 @@ class MusicWindow(Gtk.ApplicationWindow):
     def create_window_controls(self):
         # Native controls float over the page; there is no title bar or toolbar,
         # and webpage scripts do not receive a bridge into window operations.
-        self.window_controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.window_controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL,
+                                       spacing=WINDOW_BUTTON_SPACING)
         self.window_controls.set_halign(Gtk.Align.END)
         self.window_controls.set_valign(Gtk.Align.START)
-        self.window_controls.set_margin_end(16)
+        self.window_controls.set_margin_end(WINDOW_BUTTON_END)
         self.window_controls.set_margin_top(22)
         css = Gtk.CssProvider()
         css.load_from_data(b"""
             button.music-window-control {
-                min-width: 26px; min-height: 26px; padding: 0; margin: 0;
+                min-width: %dpx; min-height: %dpx; padding: 0; margin: 0;
                 border: 0; border-radius: 5px; box-shadow: none;
                 background-image: none; background-color: transparent;
                 color: #7b8090; outline-offset: 2px;
@@ -622,7 +834,7 @@ class MusicWindow(Gtk.ApplicationWindow):
             button.music-window-control:hover { background-color: rgba(123,128,144,0.08); }
             button.music-window-control:active { background-color: rgba(123,128,144,0.14); }
             button.music-window-close:hover { background-color: rgba(255,56,87,0.07); color: #ff3857; }
-        """)
+        """ % (WINDOW_BUTTON_SIZE, WINDOW_BUTTON_SIZE))
         self.control_buttons = {}
         for name, icon, tip, callback in [
             ("minimize", "netease-window-minimize-symbolic", "最小化", lambda *_: self.iconify()),
@@ -631,7 +843,7 @@ class MusicWindow(Gtk.ApplicationWindow):
         ]:
             button = Gtk.Button()
             image = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.MENU)
-            image.set_pixel_size(16)
+            image.set_pixel_size(22)
             button.set_image(image)
             button.set_tooltip_text(tip)
             button.get_accessible().set_name(tip)
@@ -647,7 +859,7 @@ class MusicWindow(Gtk.ApplicationWindow):
 
     def create_window_interaction(self):
         # A borderless window still needs native movement and resize grips.
-        # Only these narrow strips receive input; the navigation row stays live.
+        # Native grips receive pointer events synchronously on X11 and Wayland.
         self.resize_handles = []
         edges = [
             (Gdk.WindowEdge.NORTH, "n-resize", Gtk.Align.FILL, Gtk.Align.START, 6, 0),
@@ -685,6 +897,49 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.drag_handle.connect("button-press-event", self.move_pressed)
         self.overlay.add_overlay(self.drag_handle)
 
+        self.drag_gap_bounds = None
+        self.drag_gap = self.create_input_grip("grab")
+        self.drag_gap.set_halign(Gtk.Align.START)
+        self.drag_gap.set_valign(Gtk.Align.START)
+        self.drag_gap.connect("button-press-event", self.move_pressed)
+        self.overlay.add_overlay(self.drag_gap)
+
+    def clear_drag_gap(self):
+        self.drag_gap_bounds = None
+        self.drag_gap.hide()
+
+    def drag_gap_message(self, _manager, result):
+        window = self.get_window()
+        if not window or not is_player_uri(self.webview.get_uri()) or self.stack.get_visible_child_name() != "web":
+            return
+        try:
+            viewport = json.loads(result.get_js_value().to_string())
+            if viewport is None:
+                self.clear_drag_gap()
+                return
+            width, height, ratio, left, top, right, bottom = viewport
+            scale = ratio / self.webview.get_scale_factor()
+            if not 0 < scale <= 8 or not (0 <= left < right <= width and 0 <= top < bottom <= height):
+                return
+            if any(abs(css * scale - native) > 3
+                   for css, native in zip((width, height), self.viewport_size)):
+                return
+            x = max(12, math.ceil(left * scale))
+            y = max(6, math.ceil(top * scale))
+            right = min(self.viewport_size[0] - 12, math.floor(right * scale))
+            bottom = math.floor(bottom * scale)
+        except (ValueError, TypeError, OverflowError):
+            return
+        bounds = (x, y, right - x, bottom - y)
+        if min(bounds[2:]) < 12:
+            self.clear_drag_gap()
+            return
+        self.drag_gap_bounds = bounds
+        self.drag_gap.set_margin_start(x)
+        self.drag_gap.set_margin_top(y)
+        self.drag_gap.set_size_request(*bounds[2:])
+        self.drag_gap.set_visible(not window.get_state() & Gdk.WindowState.FULLSCREEN)
+
     def create_input_grip(self, cursor_name):
         grip = Gtk.EventBox()
         grip.set_visible_window(False)
@@ -708,6 +963,7 @@ class MusicWindow(Gtk.ApplicationWindow):
         for handle in self.resize_handles:
             handle.set_visible(bool(resizable))
         self.drag_handle.set_visible(not fullscreen)
+        self.drag_gap.set_visible(bool(self.drag_gap_bounds) and not fullscreen)
 
     def move_pressed(self, _grip, event):
         if event.button != 1:
@@ -730,8 +986,7 @@ class MusicWindow(Gtk.ApplicationWindow):
         return True
 
     def sync_page_controls(self, *_):
-        # Reserve space only in NetEase's real navigation row, not in the page
-        # body. Compensate for page zoom because native buttons keep their size.
+        # The native buttons keep their size while WebKit zooms the page.
         manager = self.webview.get_user_content_manager()
         if self.header_style:
             if hasattr(manager, "remove_style_sheet"):
@@ -741,38 +996,89 @@ class MusicWindow(Gtk.ApplicationWindow):
                 # styles are owned by the application; user scripts are retained.
                 manager.remove_all_style_sheets()
         zoom = self.webview.get_zoom_level()
+        metrics = (f":root {{ --music-window-controls-width: {WINDOW_BUTTON_RESERVE / zoom:.2f}px;"
+                   f" --music-window-button-pitch: {WINDOW_BUTTON_PITCH / zoom:.2f}px;"
+                   f" --music-window-compact-inset: {COMPACT_HEADER_INSET / zoom:.2f}px; }}\n")
         self.header_style = WebKit2.UserStyleSheet.new(
-            "#page_pc_main_nav { padding-right: %.2fpx !important; }" % (144 / zoom),
+            metrics + PLAYER_LAYOUT,
             WebKit2.UserContentInjectedFrames.TOP_FRAME, WebKit2.UserStyleLevel.USER,
             ["https://music.163.com/st/webplayer*"], None)
         manager.add_style_sheet(self.header_style)
         self.position_window_controls()
 
     def position_window_controls(self):
-        script = (
-            "(() => { const nav = document.getElementById('page_pc_main_nav'); "
-            "if (!nav) return 35; const r = nav.getBoundingClientRect(); "
-            "return r.top + r.height / 2; })()")
+        zoom = self.webview.get_zoom_level()
+        script = f"""(() => {{
+            const scale = devicePixelRatio / {self.webview.get_scale_factor()};
+            const style = document.documentElement.style;
+            style.setProperty('--music-window-controls-width', ({WINDOW_BUTTON_RESERVE} / scale) + 'px');
+            style.setProperty('--music-window-button-pitch', ({WINDOW_BUTTON_PITCH} / scale) + 'px');
+            style.setProperty('--music-window-compact-inset', ({COMPACT_HEADER_INSET} / scale) + 'px');
+            const compact = matchMedia('(max-width: {COMPACT_WIDTH}px)').matches;
+            const result = center => JSON.stringify([center, scale, compact]);
+            if (compact) return result({COMPACT_BUTTON_CENTER});
+            const nav = document.getElementById('page_pc_main_nav');
+            if (!nav) return result(36 * scale);
+            const icons = nav.querySelectorAll('[class*="MiniModeIconBar_"] .icon');
+            for (const icon of icons) {{
+                const rect = icon.getBoundingClientRect();
+                if (rect.width && rect.height) return result((rect.top + rect.height / 2) * scale);
+            }}
+            const rect = nav.getBoundingClientRect();
+            return result((rect.top + rect.height / 2) * scale);
+        }})()"""
         # Ubuntu 22.04 can provide WebKitGTK 2.36, before the 2.40 API.
         # Both paths run the same layout query and keep the native controls.
         if hasattr(self.webview, "evaluate_javascript"):
             self.webview.evaluate_javascript(
-                script, -1, None, None, None, self.control_position_ready, False)
+                script, -1, None, None, None, self.control_position_ready, (False, zoom))
         else:
-            self.webview.run_javascript(script, None, self.control_position_ready, True)
+            self.webview.run_javascript(script, None, self.control_position_ready, (True, zoom))
 
-    def control_position_ready(self, view, task, legacy_api):
+    def control_position_ready(self, view, task, request):
+        legacy_api, zoom = request
         try:
             if legacy_api:
                 value = view.run_javascript_finish(task).get_js_value()
             else:
                 value = view.evaluate_javascript_finish(task)
-            center = value.to_double()
-            if self.get_window() and 0 < center < 160:
-                margin = round(center * view.get_zoom_level() - 13)
+            center, scale, compact = json.loads(value.to_string())
+            if self.get_window() and zoom == view.get_zoom_level() and 0 < scale <= 8:
+                self.compact_header = compact
+                if abs(scale / zoom - self.page_scale) > 0.01:
+                    self.page_scale = scale / zoom
+                    self.queue_viewport_fit()
+                margin = round(center - WINDOW_BUTTON_SIZE / 2)
                 self.window_controls.set_margin_top(max(6, min(120, margin)))
-        except GLib.Error:
+        except (GLib.Error, TypeError, ValueError):
             pass
+
+    def viewport_size_changed(self, _view, allocation):
+        size = (allocation.width, allocation.height)
+        if min(size) > 1 and size != self.viewport_size:
+            self.viewport_size = size
+            self.clear_drag_gap()
+            self.queue_viewport_fit()
+
+    def queue_viewport_fit(self):
+        if not self.viewport_timer:
+            self.viewport_timer = GLib.timeout_add(100, self.update_viewport_fit)
+
+    def cancel_viewport_fit(self, *_):
+        if self.viewport_timer:
+            GLib.source_remove(self.viewport_timer)
+            self.viewport_timer = 0
+
+    def update_viewport_fit(self):
+        self.viewport_timer = 0
+        zoom = fit_page_zoom(self.requested_zoom, self.viewport_size, self.page_scale)
+        if zoom != self.webview.get_zoom_level():
+            self.webview.set_zoom_level(zoom)
+        else:
+            compact = self.viewport_size[0] <= COMPACT_WIDTH * zoom * self.page_scale
+            if compact != self.compact_header:
+                self.position_window_controls()
+        return False
 
     def toggle_maximize(self, *_):
         if self.is_maximized():
@@ -808,7 +1114,8 @@ class MusicWindow(Gtk.ApplicationWindow):
         return False
 
     def zoom(self, delta):
-        self.webview.set_zoom_level(max(0.5, min(2.0, self.webview.get_zoom_level() + delta)))
+        self.requested_zoom = max(0.5, min(2.0, self.requested_zoom + delta))
+        self.queue_viewport_fit()
 
     def key_press(self, _window, event):
         key = Gdk.keyval_name(event.keyval)
@@ -826,7 +1133,8 @@ class MusicWindow(Gtk.ApplicationWindow):
         elif ctrl and key in ("minus", "KP_Subtract"):
             self.zoom(-0.1)
         elif ctrl and key in ("0", "KP_0"):
-            self.webview.set_zoom_level(1.0)
+            self.requested_zoom = 1.0
+            self.queue_viewport_fit()
         elif alt and key == "Left":
             self.webview.go_back()
         elif alt and key == "Right":
@@ -840,6 +1148,7 @@ class MusicWindow(Gtk.ApplicationWindow):
 
     def load_changed(self, view, event):
         if event == WebKit2.LoadEvent.STARTED:
+            self.clear_drag_gap()
             if hasattr(self, "stream_player"):
                 self.stream_player.close()
             if hasattr(self, "quality_service"):
@@ -863,6 +1172,7 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.set_title(title)
 
     def show_error(self, message):
+        self.clear_drag_gap()
         self.progress.hide()
         self.error_label.set_text(message)
         self.stack.set_visible_child_name("error")
@@ -915,6 +1225,58 @@ class MusicWindow(Gtk.ApplicationWindow):
             self.audio_buffer.request(identifier, message.get("url"))
         elif message.get("event") == "cancel":
             self.audio_buffer.cancel(identifier)
+
+    def cache_settings_message(self, _manager, result):
+        if not self.get_window() or not is_player_uri(self.webview.get_uri()):
+            return
+        value = result.get_js_value()
+        if not value.is_string():
+            return
+        action = value.to_string()
+        if action == "read":
+            self.show_cache_directory()
+        elif action == "choose" and self.cache_chooser is None:
+            self.choose_cache_directory()
+        elif action == "reset" and self.cache_chooser is None:
+            self.change_cache_directory(self.app.default_audio_cache_directory)
+
+    def choose_cache_directory(self):
+        chooser = Gtk.FileChooserDialog(title="选择音乐缓存存放位置", transient_for=self,
+                                        modal=True, destroy_with_parent=True,
+                                        action=Gtk.FileChooserAction.SELECT_FOLDER)
+        self.cache_chooser = chooser
+        chooser.add_buttons("取消", Gtk.ResponseType.CANCEL, "选择", Gtk.ResponseType.ACCEPT)
+        directory = self.app.audio_cache_directory
+        if directory.parent.is_dir():
+            chooser.set_current_folder(str(directory.parent))
+        try:
+            folder = chooser.get_filename() if chooser.run() == Gtk.ResponseType.ACCEPT else None
+        finally:
+            chooser.destroy()
+            self.cache_chooser = None
+        if folder:
+            directory = Path(folder)
+            if directory not in (self.app.audio_cache_directory, self.app.default_audio_cache_directory):
+                directory = directory / "netease-cloud-music-audio"
+            self.change_cache_directory(directory)
+
+    def change_cache_directory(self, directory):
+        try:
+            self.app.save_audio_cache_directory(directory)
+        except OSError:
+            self.show_cache_directory("无法写入所选目录或保存设置，请检查权限后重试。")
+            return
+        with self.audio_buffer.lock:
+            self.audio_buffer.directory = directory
+        self.show_cache_directory()
+
+    def show_cache_directory(self, error=""):
+        if not self.get_window() or not is_player_uri(self.webview.get_uri()):
+            return
+        path = self.app.audio_cache_directory
+        args = json.dumps([str(path), path != self.app.default_audio_cache_directory, error])
+        script = "window.updateMusicCacheDirectory?.(..." + args + ")"
+        self.webview.run_javascript_in_world(script, CACHE_SETTINGS_WORLD, None, None, None)
 
     def quality_message(self, _manager, result):
         if not self.get_window() or not is_player_uri(self.webview.get_uri()):

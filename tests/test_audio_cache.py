@@ -176,6 +176,21 @@ class AudioCacheTests(unittest.TestCase):
         self.cache.request('trial', uri)
         self.cache.client.request.assert_called_with('trial', uri)
 
+    def test_switching_directory_keeps_current_track_readable(self):
+        old = self.archive()
+        first = 'https://m10.music.126.net/first.mp3'
+        second = 'https://m10.music.126.net/second.mp3'
+        self.cache.authorize_sources(self.source(first))
+        url = self.store(uri=first)
+        with tempfile.TemporaryDirectory() as destination:
+            self.cache.directory = Path(destination)
+            self.cache.authorize_sources(self.source(second, b'abcdefghij'))
+            self.store('next', b'abcdefghij', second)
+            self.assertEqual([file.read_bytes() for file in Path(destination).iterdir()], [b'abcdefghij'])
+            with self.opener.open(Request(url, headers={'Range': 'bytes=4-7'})) as response:
+                self.assertEqual(response.read(), b'4567')
+        self.assertEqual([file.read_bytes() for file in old.iterdir()], [b'0123456789'])
+
     def test_stream_can_take_over_an_incomplete_prefetch(self):
         self.archive()
         first = 'https://m10.music.126.net/fixture.mp3?preload'

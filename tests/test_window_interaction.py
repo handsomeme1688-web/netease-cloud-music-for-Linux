@@ -1,6 +1,7 @@
 """Native window gestures preserve event details and leave page work alone."""
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -19,6 +20,7 @@ def make_window(state=0, resizable=True):
         get_window=lambda: native, get_resizable=lambda: resizable,
         begin_move_drag=Mock(), begin_resize_drag=Mock(), toggle_maximize=Mock(),
         resize_handles=[Mock() for _ in range(8)], drag_handle=Mock(),
+        drag_gap=Mock(), drag_gap_bounds=(200, 18, 160, 42),
         window_controls=Mock(), control_buttons={"maximize": Mock()},
         update_window_interaction=Mock(), is_maximized=lambda: bool(
             state & app.Gdk.WindowState.MAXIMIZED),
@@ -31,6 +33,33 @@ def press(button=1, event_type=None):
 
 
 class WindowInteractionTests(unittest.TestCase):
+    def test_opening_ignores_legacy_maximized_geometry(self):
+        saved = {"width": 1858, "height": 1045, "maximized": True, "zoom": 1.5}
+        self.assertEqual(app.opening_window_geometry(saved, (1858, 1045)),
+                         ((800, 540), (1080, 720)))
+
+    def test_opening_remembers_normal_size_and_fits_small_desktop(self):
+        self.assertEqual(app.opening_window_geometry({"width": 860, "height": 620}, (1920, 1048)),
+                         ((800, 540), (860, 620)))
+        self.assertEqual(app.opening_window_geometry({}, (800, 480)),
+                         ((680, 408), (680, 408)))
+
+    def test_small_window_fits_zoom_and_larger_window_restores_preference(self):
+        view = Mock()
+        view.get_zoom_level.return_value = 2.0
+        window = SimpleNamespace(webview=view, viewport_timer=1, requested_zoom=2.0,
+                                 viewport_size=(480, 320), page_scale=1.1,
+                                 compact_header=True, position_window_controls=Mock())
+
+        app.MusicWindow.update_viewport_fit(window)
+        view.set_zoom_level.assert_called_once_with(0.9)
+        self.assertEqual(window.requested_zoom, 2.0)
+        view.get_zoom_level.return_value = 0.9
+        window.viewport_size = (2560, 1440)
+
+        app.MusicWindow.update_viewport_fit(window)
+        view.set_zoom_level.assert_called_with(2.0)
+
     def test_drag_passes_original_press_to_window_manager(self):
         window = make_window()
         self.assertTrue(app.MusicWindow.move_pressed(window, None, press()))
@@ -44,6 +73,25 @@ class WindowInteractionTests(unittest.TestCase):
         window.toggle_maximize.assert_called_once_with()
         self.assertFalse(app.MusicWindow.move_pressed(window, None, press(button=3)))
         window.begin_move_drag.assert_not_called()
+
+    def test_drag_gap_uses_current_viewport_and_display_scale(self):
+        window = make_window()
+        window.viewport_size = (1200, 720)
+        window.webview.get_uri.return_value = app.HOME_URL
+        window.webview.get_scale_factor.return_value = 2
+        window.stack = SimpleNamespace(get_visible_child_name=lambda: "web")
+        result = Mock()
+        result.get_js_value.return_value.to_string.return_value = json.dumps(
+            [600, 360, 4, 280, 12, 460, 50])
+
+        app.MusicWindow.drag_gap_message(window, None, result)
+
+        self.assertEqual(window.drag_gap_bounds, (560, 24, 360, 76))
+        window.drag_gap.set_size_request.assert_called_once_with(360, 76)
+        window.drag_gap.set_visible.assert_called_once_with(True)
+        window.viewport_size = (1400, 720)
+        app.MusicWindow.drag_gap_message(window, None, result)
+        window.drag_gap.set_size_request.assert_called_once_with(360, 76)
 
     def test_all_eight_edges_use_native_resize(self):
         for edge in (app.Gdk.WindowEdge.NORTH, app.Gdk.WindowEdge.NORTH_EAST,
@@ -77,6 +125,7 @@ class WindowInteractionTests(unittest.TestCase):
                 for handle in window.resize_handles:
                     handle.set_visible.assert_called_once_with(resize_visible)
                 window.drag_handle.set_visible.assert_called_once_with(drag_visible)
+                window.drag_gap.set_visible.assert_called_once_with(drag_visible)
 
     def test_focus_change_does_not_rebuild_controls_or_page_styles(self):
         window = make_window()

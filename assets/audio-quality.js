@@ -348,12 +348,13 @@
         const rect = anchor.getBoundingClientRect(), width = Math.min(356, innerWidth - 24);
         const above = rect.top - 24, below = innerHeight - rect.bottom - 24;
         const openAbove = above >= below;
+        const fitsBeside = Math.max(above, below) >= 180;
         panel.style.width = width + 'px';
         const left = anchor === settingControl ? rect.left : rect.right - width;
         panel.style.left = Math.max(12, Math.min(left, innerWidth - width - 12)) + 'px';
-        panel.style.maxHeight = Math.max(0, openAbove ? above : below) + 'px';
-        panel.style.top = openAbove ? 'auto' : (rect.bottom + 12) + 'px';
-        panel.style.bottom = openAbove ? (innerHeight - rect.top + 12) + 'px' : 'auto';
+        panel.style.maxHeight = (fitsBeside ? Math.max(above, below) : innerHeight - 24) + 'px';
+        panel.style.top = fitsBeside ? (openAbove ? 'auto' : (rect.bottom + 12) + 'px') : '12px';
+        panel.style.bottom = fitsBeside && openAbove ? (innerHeight - rect.top + 12) + 'px' : 'auto';
     }
     function open(button) {
         if (anchor === button && !panel.hidden) { close(); return; }
@@ -418,9 +419,7 @@
     function placeBadge(button, bar) {
         button.hidden = !bar;
         if (!bar) return;
-        const rect = bar.getBoundingClientRect(), size = button.getBoundingClientRect();
-        button.style.left = Math.max(12, rect.left - size.width - 16) + 'px';
-        button.style.top = rect.top + (rect.height - size.height) / 2 + 'px';
+        if (button.parentNode !== bar) bar.insertBefore(button, bar.firstChild);
         const icon = button === detailControl && bar.querySelector('svg');
         button.style.setProperty('--q-control-fg', getComputedStyle(icon || bar).color);
     }
@@ -523,13 +522,15 @@
     const STYLE = `
 .ncm-quality-button{position:fixed;z-index:1000;font:inherit;font-size:11px;line-height:20px;white-space:nowrap;color:var(--q-control-fg,inherit);background:transparent;border:1px solid currentColor;border-radius:4px;padding:0 7px;opacity:.75;cursor:pointer}
 .ncm-quality-button[hidden]{display:none}
+.ncm-quality-mini,.ncm-quality-detail{position:static;flex:none}
 .ncm-quality-detail{opacity:1}
-.ncm-quality-setting-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 22px}
-.ncm-quality-setting{position:static;font-size:inherit;line-height:26px;border-color:#8886;border-radius:6px;padding:0 10px;opacity:1}
-.ncm-quality-setting::after{content:"";display:inline-block;width:6px;height:6px;margin:0 2px 2px 10px;border-right:1px solid;border-bottom:1px solid;transform:rotate(45deg)}
+.ncm-quality-setting-row{display:flex;align-items:center;flex-wrap:wrap;font-size:var(--music-setting-font-size,14px);line-height:20px}
+.ncm-quality-setting-row > span{min-width:var(--music-setting-label-width,7em);margin-right:8px}
+.ncm-quality-setting{position:static;box-sizing:border-box;min-height:var(--music-setting-control-height,28px);font-size:inherit;line-height:20px;border-color:#8886;border-radius:6px;padding:2px 8px;opacity:1}
+.ncm-quality-setting::after{content:"";display:inline-block;width:5px;height:5px;margin:0 2px 3px 8px;border-right:1px solid;border-bottom:1px solid;transform:rotate(45deg)}
 .ncm-quality-button:hover,.ncm-quality-button[aria-expanded=true]{color:#ba8c45;opacity:1}
 .ncm-quality-detail:hover,.ncm-quality-detail[aria-expanded=true]{color:var(--q-control-fg,inherit);background:#8882}
-.ncm-quality-panel{--q-bg:#fff;--q-fg:#292a30;--q-muted:#909098;--q-hover:#f7f5f1;position:fixed;z-index:2147483000;display:flex;flex-direction:column;max-height:calc(100vh - 120px);color:var(--q-fg);background:var(--q-bg);border:1px solid rgba(128,128,128,.14);border-radius:14px;box-shadow:0 8px 36px #0003;font-family:inherit;font-size:13px;overflow:hidden;text-align:left}
+.ncm-quality-panel{--q-bg:#fff;--q-fg:#292a30;--q-muted:#909098;--q-hover:#f7f5f1;position:fixed;z-index:2147483000;display:flex;flex-direction:column;box-sizing:border-box;max-height:calc(100vh - 24px);color:var(--q-fg);background:var(--q-bg);border:1px solid rgba(128,128,128,.14);border-radius:14px;box-shadow:0 8px 36px #0003;font-family:inherit;font-size:13px;overflow:hidden;text-align:left}
 .ncm-quality-panel[hidden]{display:none}
 .ncm-quality-panel[data-theme=dark]{--q-bg:#26262c;--q-fg:#efeff2;--q-muted:#96969f;--q-hover:#333238}
 .ncm-quality-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 10px;font-size:16px;font-weight:600;flex-shrink:0}
