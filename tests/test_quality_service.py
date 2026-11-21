@@ -81,7 +81,7 @@ class QualityServiceTests(unittest.TestCase):
         self.endpoint = patch('quality_service.ENDPOINT', 'http://127.0.0.1:%d/eapi/song/enhance/player/url/v1' % self.server.server_port)
         self.endpoint.start()
         self.cookies = Cookies()
-        self.client = AudioBuffer(WEBKIT_API, 'direct', lambda *_: None)
+        self.client = AudioBuffer(WEBKIT_API, lambda *_: None)
         self.service = QualityService(self.client, self.cookies, lambda *args: self.results.append(args))
 
     def tearDown(self):

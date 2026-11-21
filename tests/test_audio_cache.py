@@ -1,6 +1,9 @@
 """Full and partial HTTP reads of private bounded audio copies."""
+import hashlib
+from pathlib import Path
 import ssl
 import socket
+import tempfile
 from urllib.request import build_opener, ProxyHandler, Request, HTTPSHandler
 from urllib.error import HTTPError
 from unittest.mock import Mock, patch
@@ -25,15 +28,15 @@ class AudioCacheTests(unittest.TestCase):
         self.patch=patch('audio_cache.AudioBuffer')
         self.patch.start()
         self.send=Mock()
-        self.cache=AudioCache('4.1','direct',self.send)
+        self.cache=AudioCache('4.1',self.send)
         self.opener=build_opener(ProxyHandler({}), HTTPSHandler(context=ssl.create_default_context(cadata=self.cache.certificate)))
 
     def tearDown(self):
         self.cache.close()
         self.patch.stop()
 
-    def store(self, identifier='one', data=b'0123456789'):
-        self.cache.request(identifier,'https://m10.music.126.net/fixture.mp3')
+    def store(self, identifier='one', data=b'0123456789', uri='https://m10.music.126.net/fixture.mp3'):
+        self.cache.request(identifier, uri)
         self.cache.receive(identifier,'head',{'bytes':len(data)})
         self.cache.receive(identifier,'chunk',{'data':data})
         self.cache.receive(identifier,'complete',{'bytes':len(data),'mime':'audio/mpeg'})
@@ -128,3 +131,91 @@ class AudioCacheTests(unittest.TestCase):
             self.cache.receive('one','chunk',{'data':b'12345'})
             self.assertNotIn('one',self.cache.entries)
             self.send.assert_called_with('one','failed',{})
+
+    def archive(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.cache.directory = Path(directory.name)
+        return self.cache.directory
+
+    @staticmethod
+    def source(uri, data=b'0123456789', **changes):
+        item = dict(url=uri, code=200, md5=hashlib.md5(data).hexdigest(), size=len(data), type='mp3')
+        item.update(changes)
+        return {'code': 200, 'data': [item]}
+
+    def test_archive_reuses_complete_track_across_restart_and_fresh_url(self):
+        directory = self.archive()
+        first = 'https://m10.music.126.net/fixture.mp3?old'
+        self.cache.authorize_sources(self.source(first))
+        self.store(uri=first)
+        self.cache.cancel('one')
+        self.assertEqual(len(list(directory.iterdir())), 1)
+
+        second = 'https://m20.music.126.net/fixture.mp3?new'
+        self.cache.close()
+        self.cache = AudioCache('4.1', self.send, directory)
+        self.cache.client.request.reset_mock()
+        self.opener = build_opener(ProxyHandler({}),
+            HTTPSHandler(context=ssl.create_default_context(cadata=self.cache.certificate)))
+        self.cache.authorize_sources(self.source(second))
+        self.cache.request('again', second)
+        self.cache.client.request.assert_not_called()
+        url = self.send.call_args.args[2]['url']
+        with self.opener.open(Request(url, headers={'Range': 'bytes=4-7'})) as response:
+            self.assertEqual(response.read(), b'4567')
+            self.assertEqual(response.headers['Content-Range'], 'bytes 4-7/10')
+
+    def test_archive_requires_current_full_source_authorization(self):
+        self.archive()
+        uri = 'https://m10.music.126.net/fixture.mp3'
+        self.cache.authorize_sources(self.source(uri))
+        self.store()
+        self.cache.cancel_all()
+        self.cache.authorize_sources(self.source(uri, freeTrialInfo={'start': 0, 'end': 30}))
+        self.cache.request('trial', uri)
+        self.cache.client.request.assert_called_with('trial', uri)
+
+    def test_stream_can_take_over_an_incomplete_prefetch(self):
+        self.archive()
+        first = 'https://m10.music.126.net/fixture.mp3?preload'
+        second = 'https://m20.music.126.net/fixture.mp3?play'
+        self.cache.authorize_sources(self.source(first))
+        self.cache.authorize_sources(self.source(second))
+        self.cache.request('prefetch', first)
+        self.cache.receive('prefetch', 'head', {'bytes': 10, 'mime': 'audio/mpeg'})
+        self.cache.receive('prefetch', 'chunk', {'data': b'012345'})
+        stream = Mock()
+        self.cache.request('playing', second, stream)
+        self.cache.cancel('prefetch')
+        self.cache.client.request.assert_called_once_with('prefetch', first)
+        self.cache.client.cancel.assert_not_called()
+        url = stream.call_args.args[1]['url']
+        with self.opener.open(Request(url, headers={'Range': 'bytes=2-4'})) as response:
+            self.assertEqual(response.read(), b'234')
+        self.cache.receive('prefetch', 'chunk', {'data': b'6789'})
+        self.cache.receive('prefetch', 'complete', {'bytes': 10, 'mime': 'audio/mpeg'})
+        self.assertEqual(stream.call_args.args[0], 'complete')
+
+    def test_bad_digest_remains_playable_but_is_not_archived(self):
+        directory = self.archive()
+        uri = 'https://m10.music.126.net/fixture.mp3'
+        self.cache.authorize_sources(self.source(uri, data=b'x' * 10))
+        url = self.store()
+        with self.opener.open(url) as response:
+            self.assertEqual(response.read(), b'0123456789')
+        self.assertEqual(list(directory.iterdir()), [])
+
+    def test_archive_prunes_least_recently_used_tracks(self):
+        directory = self.archive()
+        with patch('audio_cache.DISK_LIMIT', 20):
+            for index in range(3):
+                uri = f'https://m10.music.126.net/{index}.mp3'
+                data = bytes([index]) * 10
+                self.cache.authorize_sources(self.source(uri, data))
+                self.store('archive', data, uri)
+                self.cache.cancel('archive')
+        self.assertEqual(len(list(directory.iterdir())), 2)
+        with patch.object(self.cache.client, 'request') as request:
+            self.cache.request('first', 'https://m10.music.126.net/0.mp3')
+            request.assert_called_once()

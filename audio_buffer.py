@@ -27,7 +27,7 @@ def audio_uri(value):
 
 
 class AudioBuffer:
-    def __init__(self, api, proxy_mode, send):
+    def __init__(self, api, send):
         gi.require_version('Soup', '3.0' if api == '4.1' else '2.4')
         from gi.repository import Soup
         self.Soup = Soup
@@ -37,13 +37,7 @@ class AudioBuffer:
         self.session = Soup.Session(timeout=30)
         if api == '4.0':
             self.session.props.ssl_strict = True
-        if proxy_mode == 'direct':
-            # The old GI annotation for new() treats ignore_hosts as one string.
-            # GObject properties expose the correct string-array type on all versions.
-            self.session.props.proxy_resolver = Gio.SimpleProxyResolver(
-                default_proxy=None, ignore_hosts=['*'])
-        else:
-            self.session.props.proxy_resolver = Gio.ProxyResolver.get_default()
+        self.session.props.proxy_resolver = Gio.SimpleProxyResolver(default_proxy=None)
 
     def cancel_all(self):
         for identifier in list(self.jobs):
@@ -139,7 +133,7 @@ class AudioBuffer:
             self.fail(job)
             return
         # The page uses the announced length to decide how long to wait.
-        self.send(job['id'], 'head', {'bytes': job['declared']}, lambda: self.read(job))
+        self.send(job['id'], 'head', {'bytes': job['declared'], 'mime': job['mime']}, lambda: self.read(job))
 
     def read(self, job):
         if self.active(job):

@@ -9,12 +9,12 @@
 
 ## 安装
 
-适用于 Debian / Ubuntu 桌面，需要 X11 或 Wayland、会话 D-Bus、音频输出和网络。
+适用于 Debian / Ubuntu 桌面，需要 X11 或 Wayland、会话 D-Bus、音频输出和网络。应用始终使用直连。
 
 下载 `.deb` 后，在安装包所在目录运行：
 
 ```sh
-sudo apt install ./netease-cloud-music-webkit_1.0.11_all.deb
+sudo apt install ./netease-cloud-music-webkit_1.0.12_all.deb
 ```
 
 APT 自动安装依赖。安装后在应用菜单中打开“网易云音乐”，点击右上角“登录”扫码。账号、曲库和会员权限由官方网页提供。
@@ -43,7 +43,7 @@ bash install.sh
 | HTTP | `gir1.2-soup-3.0`（4.1）或 `gir1.2-soup-2.4`（4.0），随 WebKitGTK 安装 |
 | HTTPS | `ca-certificates`、`openssl` |
 | 图标 | `librsvg2-common` |
-| 音频解码 | `gstreamer1.0-plugins-base`、`gstreamer1.0-plugins-good`、`gstreamer1.0-libav` |
+| 音频解码 | `gir1.2-gstreamer-1.0`、`gstreamer1.0-plugins-base`、`gstreamer1.0-plugins-good`、`gstreamer1.0-libav` |
 | 音频输出 | `gstreamer1.0-alsa`，以及 `gstreamer1.0-plugins-good` ≥ 1.18 或 `gstreamer1.0-pulseaudio` |
 | 中文字体（推荐） | `fonts-noto-cjk` 或 `fonts-wqy-microhei` |
 | 会话 D-Bus（推荐） | `dbus-user-session` 或 `dbus-x11` |
@@ -56,9 +56,9 @@ bash install.sh
 
 ## 使用
 
-点击底部音质按钮选择标准、极高、无损、Hi-Res、高清臻音、超清母带、沉浸环绕声或臻音全景声。菜单按账号与歌曲权限显示可选项，保存音质偏好，并显示实际播放档位。
+设置 → 播放、底部播放栏和歌曲详情页共用默认音质。改动后，当前歌曲按可用档位继续播放，播放栏显示实际音质。菜单按账号权限提供标准、极高、无损、Hi-Res、高清臻音、超清母带等档位。
 
-歌曲完整加载后播放，播放期间预载队列中的下一首。首次加载时，底部音质按钮显示下载进度。
+音乐先缓冲一小段再起播，后台继续下载，并预载下一首。最近的完整音频保留在本地缓存（最多 1 GiB、64 个文件），重播和重开应用时可复用。
 
 臻音全景声需要播放引擎支持 AV3A 解码；缺少支持时，菜单会注明并灰显该项。
 
@@ -85,14 +85,6 @@ netease-cloud-music --check
 ```sh
 WEBKIT_DISABLE_DMABUF_RENDERER=1 netease-cloud-music
 ```
-
-**HTTP 400 或代理异常：** 完全退出应用后，切换为直连，再重新打开：
-
-```sh
-netease-cloud-music --set-proxy-mode direct
-```
-
-恢复系统代理使用 `netease-cloud-music --set-proxy-mode system`。
 
 提交 Issue 时请附上发行版、桌面环境、软件版本、`--check` 输出和复现步骤。
 

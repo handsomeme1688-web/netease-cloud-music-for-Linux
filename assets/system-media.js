@@ -48,7 +48,7 @@
         const decoded = howl && howl._state === 'loaded';
         window.webkit.messageHandlers.systemMedia.postMessage(JSON.stringify({
             active: !!(howl && howl._state !== 'unloaded') || !!(audio && (audio.currentSrc || audio.src)),
-            playing: howl ? !!(decoded && howl.playing()) : !!(audio && !audio.paused && !audio.ended),
+            playing: howl ? !!(decoded && howl.playing() && !howl._buffering) : !!(audio && !audio.paused && !audio.ended),
             position: howl ? (decoded ? number(howl.seek()) : 0) : (audio ? number(audio.currentTime) : 0),
             duration: howl ? (decoded ? number(howl.duration()) : 0) : (audio ? number(audio.duration) : 0),
             volume: howl ? number(howl.volume() * window.Howler.volume()) : (audio ? audio.volume : 1),
@@ -110,7 +110,7 @@
             else if (action === 'pause') howl.pause();
             else if (action === 'stop') howl.stop();
             else if (action === 'seekto') howl.seek(args.seekTime);
-            else if (action === 'volume') window.Howler.volume(args.value);
+            else if (action === 'volume') howl.volume(args.value);
         } else if (action === 'play') {
             const promise = audio.play();
             if (promise && promise.catch) promise.catch(() => {});

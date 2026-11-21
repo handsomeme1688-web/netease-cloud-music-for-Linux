@@ -58,10 +58,15 @@
     let preload;
     const fields = {standard: 'l', higher: 'm', exhigh: 'h', lossless: 'sq', hires: 'hr',
         jyeffect: 'je', jymaster: 'jm', sky: 'sk', vivid: 'vi'};
-    let tool, store, playerUrl, musicDetail, songQualities, pending, panel, list, footer, anchor, control, loading;
+    let tool, store, playerUrl, musicDetail, songQualities, pending, deferred, panel, list, footer, anchor, loading;
+    let control, detailControl, settingControl, settingRow;
     let signature = '', scheduled = false, notice = '', lastTrack = '';
     const trackId = state => String(state.playing.resourceTrackId || '');
     const currentHowl = () => window.__musicNativeHowl && window.__musicNativeHowl();
+    const preference = state => {
+        const quantity = state.setting.quantity || {};
+        return find(state.host.isAnonymous ? quantity.listenAnon : quantity.listenReg) || find(quantity.listen);
+    };
     const pauseAction = () => store.dispatch({type: 'playing/pause', payload: {}});
     const remember = (state, choice) => store.dispatch({type: 'setting/updateQuantity', payload: {
         listen: choice.value, [state.host.isAnonymous ? 'listenAnon' : 'listenReg']: choice.value}});
@@ -73,6 +78,7 @@
         task.controller.abort();
         task.download.then(result => { if (result) result.release(); });
     }
+    Object.defineProperty(window, '__musicDiscardPreload', {value: discardPreload});
     function preloadNext(info) {
         const howl = currentHowl(), url = sourceKey(info.musicurl);
         if (!howl || howl._state !== 'loaded' || !howl.playing() || pending ||
@@ -203,12 +209,15 @@
         }).catch(() => { details.set(id, false); sync(); });
     }
 
-    function availability(choice, state) {
+    function originalQuality(playing) {
+        const track = playing.curPlaying && playing.curPlaying.track;
+        return playing.curPlaying && (playing.trackFileType === 'local' ||
+            track && track.privilege && track.privilege.cloudSong || /voice/i.test(playing.resourceType || ''));
+    }
+
+    function restriction(choice, state) {
         const host = state.host || {}, playing = state.playing;
         const track = playing.curPlaying && playing.curPlaying.track;
-        if (playing.curPlaying && (playing.trackFileType === 'local' ||
-            track && track.privilege && track.privilege.cloudSong || /voice/i.test(playing.resourceType || '')))
-            return '当前内容使用原始音质';
         const maxFree = Math.max(192, Number((playing.resourcePrivilege || {}).maxFreeBr) || 0);
         const purchased = !!(track && track.privilege && track.privilege.payed);
         const musicPackage = host.isMusicPackage && (state.configCenter || {})['preload#musicPackageCanUseHiresAndLoseless'];
@@ -217,7 +226,15 @@
             purchased || musicPackage && [320, 999, 1999].includes(choice.value) || trial && trial.canUse;
         if (!allowed) return host.isAnonymous ? '登录后查看可用音质' : choice.tier === 'SVIP' ? '需超级会员' : '需黑胶会员';
         if (choice.level === 'vivid' && !vividSupported) return '需 AV3A 解码支持';
-        const detail = details.get(trackId(state));
+        return '';
+    }
+
+    function songAvailability(choice, state) {
+        const id = trackId(state);
+        if (!id) return '';
+        const playing = state.playing, track = playing.curPlaying && playing.curPlaying.track;
+        if (originalQuality(playing)) return '当前内容使用原始音质';
+        const detail = details.get(id);
         if (detail) {
             const audio = detail[fields[choice.level]];
             const exists = audio && Number(audio.size) > 0 || choice.level === 'sky' &&
@@ -230,11 +247,30 @@
         return '';
     }
     async function choose(choice) {
-        if (!store || pending || availability(choice, store.getState())) return;
+        if (!store || pending || restriction(choice, store.getState())) return;
         const state = store.getState(), id = trackId(state);
-        if (!id) { remember(state, choice); emit('已记住音质偏好'); return; }
+        deferred = null;
+        if (preference(state) !== choice) {
+            discardPreload();
+            remember(state, choice);
+        }
+        if (!id) { emit('已设置默认音质'); return; }
+        if (originalQuality(state.playing)) { emit('默认音质已保存，当前内容使用原始音质'); return; }
         const howl = currentHowl();
-        if (howl && howl._state !== 'loaded') { emit('请等待当前歌曲加载完成'); return; }
+        if (howl && howl._state === 'loading') {
+            const selection = deferred = {id, choice};
+            howl.once('load', () => setTimeout(() => {
+                const current = store.getState();
+                if (deferred === selection && currentHowl() === howl && trackId(current) === id &&
+                    preference(current) === choice) choose(choice);
+            }, 0));
+            emit('默认音质已保存，歌曲加载后应用');
+            return;
+        }
+        if (howl && howl._state === 'loaded' && Number(state.playing.resourcePlayingQuality) === choice.value) {
+            emit('已使用' + choice.name);
+            return;
+        }
         const ticket = pending = {track: id, choice, phase: 'checking', controller: new AbortController(),
             paused: howl ? !howl.playing() : state.playing.playingState !== 2};
         ticket.timer = setTimeout(() => {
@@ -255,8 +291,7 @@
             if (audio.type === 'av3a' && !vividSupported) throw new Error('codec');
             if (response.cacheLimit && audio.size > response.cacheLimit) throw new Error('size');
             if (actual.value === Number(store.getState().playing.resourcePlayingQuality)) {
-                remember(store.getState(), choice);
-                clearPending(); emit(actual.value === choice.value ? '已使用' + actual.name : '已保存偏好；当前歌曲提供' + actual.name);
+                clearPending(); emit(actual.value === choice.value ? '已使用' + actual.name : '当前歌曲使用' + actual.name);
                 return;
             }
             ticket.actual = actual; ticket.reply = response;
@@ -271,7 +306,6 @@
                 if (pending !== ticket || trackId(store.getState()) !== id) { prepared.release(); return; }
                 ticket.prepared = prepared;
             }
-            remember(store.getState(), choice);
             const active = currentHowl();
             const position = active && active._state === 'loaded' ? Number(active.seek()) : 0;
             ticket.paused = active ? !active.playing() : store.getState().playing.playingState !== 2;
@@ -303,12 +337,23 @@
         panel.hidden = true;
         if (anchor) anchor.setAttribute('aria-expanded', 'false');
     }
+    function visible(node) {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && rect.top < innerHeight && rect.bottom > 0 &&
+            getComputedStyle(node).visibility !== 'hidden';
+    }
     function position() {
         if (!anchor || panel.hidden) return;
+        if (!visible(anchor)) { close(); return; }
         const rect = anchor.getBoundingClientRect(), width = Math.min(356, innerWidth - 24);
+        const above = rect.top - 24, below = innerHeight - rect.bottom - 24;
+        const openAbove = above >= below;
         panel.style.width = width + 'px';
-        panel.style.left = Math.max(12, Math.min(rect.right - width, innerWidth - width - 12)) + 'px';
-        panel.style.bottom = Math.max(12, innerHeight - rect.top + 12) + 'px';
+        const left = anchor === settingControl ? rect.left : rect.right - width;
+        panel.style.left = Math.max(12, Math.min(left, innerWidth - width - 12)) + 'px';
+        panel.style.maxHeight = Math.max(0, openAbove ? above : below) + 'px';
+        panel.style.top = openAbove ? 'auto' : (rect.bottom + 12) + 'px';
+        panel.style.bottom = openAbove ? (innerHeight - rect.top + 12) + 'px' : 'auto';
     }
     function open(button) {
         if (anchor === button && !panel.hidden) { close(); return; }
@@ -324,7 +369,12 @@
     function sync() {
         if (!store || !panel) return;
         const state = store.getState(), playing = state.playing, id = trackId(state);
-        if (lastTrack !== id) { lastTrack = id; notice = ''; if (!panel.hidden) fetchDetails(); }
+        if (lastTrack !== id) {
+            lastTrack = id;
+            deferred = null;
+            notice = '';
+            if (!panel.hidden) fetchDetails();
+        }
         if (pending && pending.track !== id) {
             const switching = pending.phase === 'switching'; clearPending(); notice = '';
             if (switching) store.dispatch({type: 'playing/onLoadingSeekUpdate', payload: {loadingSeekDuration: 0}});
@@ -340,57 +390,76 @@
             }
         }
         const actual = find(playing.resourcePlayingQuality);
-        const quantity = state.setting.quantity || {};
-        const preferred = find(state.host.isAnonymous ? quantity.listenAnon : quantity.listenReg);
-        const reasons = choices.map(q => availability(q, state));
+        const preferred = preference(state);
+        const blocked = choices.map(q => restriction(q, state));
+        const reasons = choices.map((q, i) => blocked[i] || songAvailability(q, state));
         const next = [id, actual && actual.value, preferred && preferred.value, notice,
-            !!pending, loading && loading.label, reasons.join(',')].join('|');
+            !!pending, loading && loading.label, blocked.join(','), reasons.join(',')].join('|');
         if (next === signature) return;
         signature = next;
-        for (const button of document.querySelectorAll('.ncm-quality-button')) {
-            button.textContent = loading ? loading.label : pending ? '切换中…' : actual && id ? actual.name : '音质';
-            button.title = loading ? '正在准备整首歌曲' : actual && id ? '当前音质：' + actual.name : '选择播放音质';
+        const label = loading ? loading.label : pending ? '切换中…' : actual && id ? actual.name : '音质';
+        for (const button of [control, detailControl]) {
+            if (button.textContent !== label) button.textContent = label;
+            button.title = loading ? '正在加载音频' : actual && id ? '当前音质：' + actual.name : '选择播放音质';
         }
+        settingControl.textContent = preferred ? preferred.name : '选择音质';
         choices.forEach((choice, index) => {
             const row = rows.get(choice.value), reason = reasons[index];
-            row.disabled = !!pending || !!reason;
+            row.disabled = !!pending || !!blocked[index];
             row.title = reason || choice.description;
-            row.setAttribute('aria-checked', String(!!actual && actual.value === choice.value && !!id));
+            row.setAttribute('aria-checked', String(preferred === choice));
             row.querySelector('.ncm-quality-description').textContent = reason || choice.description;
         });
         const info = actual && metadata.get(id + ':' + actual.value);
-        footer.textContent = notice || (id && actual ? '当前：' + actual.name +
-            (info && info.bitrate ? ' · ' + Math.round(info.bitrate / 1000) + ' kbps' : '') +
-            (preferred && preferred.value !== actual.value ? ' · 优先：' + preferred.name : '') : '选择后记住偏好');
+        const current = id && actual ? '当前播放：' + actual.name +
+            (info && info.bitrate ? ' · ' + Math.round(info.bitrate / 1000) + ' kbps' : '') : '';
+        footer.textContent = [preferred && '默认：' + preferred.name, current, notice].filter(Boolean).join(' · ');
+    }
+    function placeBadge(button, bar) {
+        button.hidden = !bar;
+        if (!bar) return;
+        const rect = bar.getBoundingClientRect(), size = button.getBoundingClientRect();
+        button.style.left = Math.max(12, rect.left - size.width - 16) + 'px';
+        button.style.top = rect.top + (rect.height - size.height) / 2 + 'px';
+        const icon = button === detailControl && bar.querySelector('svg');
+        button.style.setProperty('--q-control-fg', getComputedStyle(icon || bar).color);
     }
     function place() {
         scheduled = false;
-        const bar = [...document.querySelectorAll('#page_pc_mini_bar .right-side .right')].find(node => {
-            const rect = node.getBoundingClientRect();
-            return rect.width > 0 && rect.height > 0 && rect.top < innerHeight && rect.bottom > 0;
-        });
-        control.hidden = !bar;
-        if (bar) {
-            const rect = bar.getBoundingClientRect(), size = control.getBoundingClientRect();
-            control.style.left = Math.max(12, rect.left - size.width - 16) + 'px';
-            control.style.top = rect.top + (rect.height - size.height) / 2 + 'px';
-            control.style.setProperty('--q-control-fg', getComputedStyle(bar).color);
-        } else close();
+        const bars = [...document.querySelectorAll('#page_pc_mini_bar .right-side .right')].filter(visible);
+        const detailBar = bars.find(bar => bar.closest('.vinyl-page-bar-wrapper'));
+        placeBadge(control, detailBar ? null : bars[0]);
+        placeBadge(detailControl, detailBar);
+        const settings = document.querySelector('#page_pc_setting #play > .play');
+        if (settings && settingRow.parentNode !== settings) settings.insertBefore(settingRow, settings.firstChild);
         sync();
+        position();
+    }
+    function makeControl(kind, label) {
+        const button = element('button', 'ncm-quality-button ncm-quality-' + kind, '音质');
+        button.type = 'button';
+        button.setAttribute('aria-label', label);
+        button.setAttribute('aria-haspopup', 'menu');
+        button.setAttribute('aria-expanded', 'false');
+        button.addEventListener('click', event => { event.stopPropagation(); open(button); });
+        return button;
     }
     function mount() {
         if (!tool || !tool.app || !tool.app._store || !playerUrl || !document.body) return false;
         store = tool.app._store;
         if (!store.getState().playing || !store.getState().setting) return false;
         const style = element('style', ''); style.textContent = STYLE; document.head.appendChild(style);
-        control = element('button', 'ncm-quality-button', '音质'); control.type = 'button';
-        control.setAttribute('aria-label', '选择播放音质'); control.setAttribute('aria-haspopup', 'menu');
-        control.setAttribute('aria-expanded', 'false');
-        control.addEventListener('click', event => { event.stopPropagation(); open(control); });
+        control = makeControl('mini', '选择播放音质');
+        detailControl = makeControl('detail', '歌曲详情页播放音质');
+        settingControl = makeControl('setting', '默认音质');
+        settingRow = element('section', 'ncm-quality-setting-row');
+        settingRow.appendChild(element('span', '', '默认音质'));
+        settingRow.appendChild(settingControl);
         document.body.appendChild(control);
+        document.body.appendChild(detailControl);
         panel = element('div', 'ncm-quality-panel'); panel.hidden = true;
-        panel.setAttribute('role', 'menu'); panel.setAttribute('aria-label', '播放音质');
-        const header = element('div', 'ncm-quality-header', '播放音质');
+        panel.setAttribute('role', 'menu'); panel.setAttribute('aria-label', '默认音质');
+        const header = element('div', 'ncm-quality-header', '默认音质');
         const dismiss = element('button', 'ncm-quality-close', '×'); dismiss.type = 'button';
         dismiss.setAttribute('aria-label', '关闭音质菜单'); dismiss.addEventListener('click', close); header.appendChild(dismiss);
         list = element('div', 'ncm-quality-list'); footer = element('div', 'ncm-quality-footer');
@@ -421,7 +490,8 @@
         document.addEventListener('pointerdown', event => {
             if (!panel.hidden && !panel.contains(event.target) && event.target !== anchor) close();
         }, true);
-        window.addEventListener('resize', () => { place(); position(); });
+        window.addEventListener('resize', place);
+        window.addEventListener('scroll', position, true);
         window.addEventListener('music-audio-progress', ({detail}) => {
             if (detail.loading) {
                 const percent = detail.total ? Math.min(99, Math.floor(detail.bytes * 100 / detail.total)) : null;
@@ -452,7 +522,13 @@
     }
     const STYLE = `
 .ncm-quality-button{position:fixed;z-index:1000;font:inherit;font-size:11px;line-height:20px;white-space:nowrap;color:var(--q-control-fg,inherit);background:transparent;border:1px solid currentColor;border-radius:4px;padding:0 7px;opacity:.75;cursor:pointer}
+.ncm-quality-button[hidden]{display:none}
+.ncm-quality-detail{opacity:1}
+.ncm-quality-setting-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 22px}
+.ncm-quality-setting{position:static;font-size:inherit;line-height:26px;border-color:#8886;border-radius:6px;padding:0 10px;opacity:1}
+.ncm-quality-setting::after{content:"";display:inline-block;width:6px;height:6px;margin:0 2px 2px 10px;border-right:1px solid;border-bottom:1px solid;transform:rotate(45deg)}
 .ncm-quality-button:hover,.ncm-quality-button[aria-expanded=true]{color:#ba8c45;opacity:1}
+.ncm-quality-detail:hover,.ncm-quality-detail[aria-expanded=true]{color:var(--q-control-fg,inherit);background:#8882}
 .ncm-quality-panel{--q-bg:#fff;--q-fg:#292a30;--q-muted:#909098;--q-hover:#f7f5f1;position:fixed;z-index:2147483000;display:flex;flex-direction:column;max-height:calc(100vh - 120px);color:var(--q-fg);background:var(--q-bg);border:1px solid rgba(128,128,128,.14);border-radius:14px;box-shadow:0 8px 36px #0003;font-family:inherit;font-size:13px;overflow:hidden;text-align:left}
 .ncm-quality-panel[hidden]{display:none}
 .ncm-quality-panel[data-theme=dark]{--q-bg:#26262c;--q-fg:#efeff2;--q-muted:#96969f;--q-hover:#333238}
