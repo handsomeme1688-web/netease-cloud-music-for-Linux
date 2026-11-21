@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.0.13"
+VERSION = "1.1.0"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 PLAYBACK_LOG_LIMIT = 2 * 1024 * 1024
@@ -196,7 +196,7 @@ from media_service import MediaService
 from audio_buffer import delivery_script
 from audio_cache import AudioCache
 from quality_service import QualityService
-from stream_player import StreamPlayer
+from stream_player import StreamPlayer, transition_settings
 
 if (Gtk.MAJOR_VERSION, Gtk.MINOR_VERSION) < (3, 24):
     print("需要 GTK 3.24 或更新的 GTK 3 版本。", file=sys.stderr)
@@ -327,6 +327,8 @@ class MusicApplication(Gtk.Application):
         self.default_audio_cache_directory = self.cache_dir / "audio"
         self.audio_cache_config = self.config_dir / "audio-cache.json"
         self.audio_cache_directory = self.load_audio_cache_directory()
+        self.transition_config = self.config_dir / "playback-transition.json"
+        self.transition = self.load_transition()
         self.state_path = self.config_dir / "window.json"
         self.state = {}
         try:
@@ -601,6 +603,20 @@ class MusicApplication(Gtk.Application):
             temp.replace(self.audio_cache_config)
         self.audio_cache_directory = path
 
+    def load_transition(self):
+        try:
+            settings = json.loads(self.transition_config.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            settings = None
+        return transition_settings(settings if isinstance(settings, dict) else {})
+
+    def save_transition(self, settings):
+        settings = transition_settings(settings)
+        temp = self.transition_config.with_suffix(".tmp")
+        temp.write_text(json.dumps(settings), encoding="utf-8")
+        temp.replace(self.transition_config)
+        self.transition = settings
+
     def save_state(self, window):
         width, height = window.normal_size
         self.state = {"width": width, "height": height, "zoom": window.requested_zoom}
@@ -691,7 +707,14 @@ class MusicWindow(Gtk.ApplicationWindow):
                 cache_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
                 WebKit2.UserScriptInjectionTime.END, CACHE_SETTINGS_WORLD,
                 ["https://music.163.com/st/webplayer*"], None))
-            self.stream_player = StreamPlayer(self.audio_buffer, self.deliver_stream)
+            manager.register_script_message_handler_in_world("transitionSettings", CACHE_SETTINGS_WORLD)
+            manager.connect("script-message-received::transitionSettings", self.transition_settings_message)
+            transition_script = Path(__file__).resolve().parent / "assets" / "transition-settings.js"
+            manager.add_script(WebKit2.UserScript.new_for_world(
+                transition_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                WebKit2.UserScriptInjectionTime.END, CACHE_SETTINGS_WORLD,
+                ["https://music.163.com/st/webplayer*"], None))
+            self.stream_player = StreamPlayer(self.audio_buffer, self.deliver_stream, transition=app.transition)
             manager.register_script_message_handler("streamPlayer")
             manager.connect("script-message-received::streamPlayer", self.stream_message)
             self.quality_service = QualityService(self.audio_buffer.client,
@@ -841,7 +864,7 @@ class MusicWindow(Gtk.ApplicationWindow):
             ("maximize", "netease-window-maximize-symbolic", "最大化", self.toggle_maximize),
             ("close", "netease-window-close-symbolic", "关闭", lambda *_: self.close()),
         ]:
-            button = Gtk.Button()
+            button = Gtk.Button(focus_on_click=False)
             image = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.MENU)
             image.set_pixel_size(22)
             button.set_image(image)
@@ -1222,7 +1245,7 @@ class MusicWindow(Gtk.ApplicationWindow):
         if not isinstance(identifier, str):
             return
         if message.get("event") == "request":
-            self.audio_buffer.request(identifier, message.get("url"))
+            self.audio_buffer.request(identifier, message.get("url"), background=message.get("background") is True)
         elif message.get("event") == "cancel":
             self.audio_buffer.cancel(identifier)
 
@@ -1276,6 +1299,28 @@ class MusicWindow(Gtk.ApplicationWindow):
         path = self.app.audio_cache_directory
         args = json.dumps([str(path), path != self.app.default_audio_cache_directory, error])
         script = "window.updateMusicCacheDirectory?.(..." + args + ")"
+        self.webview.run_javascript_in_world(script, CACHE_SETTINGS_WORLD, None, None, None)
+
+    def transition_settings_message(self, _manager, result):
+        if not self.get_window() or not is_player_uri(self.webview.get_uri()):
+            return
+        text = result.get_js_value().to_string()
+        try:
+            message = json.loads(text) if len(text) <= 256 else None
+        except ValueError:
+            return
+        error = ""
+        if isinstance(message, dict):
+            try:
+                self.app.save_transition(message)
+            except OSError:
+                error = "无法保存过渡设置。"
+            else:
+                self.stream_player.configure(self.app.transition)
+        elif message != "read":
+            return
+        args = json.dumps([self.app.transition, error])
+        script = "window.updateMusicTransition?.(..." + args + ")"
         self.webview.run_javascript_in_world(script, CACHE_SETTINGS_WORLD, None, None, None)
 
     def quality_message(self, _manager, result):

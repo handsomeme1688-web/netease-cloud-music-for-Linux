@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import app
-from audio_buffer import AudioBuffer, MAX_BYTES, audio_uri, delivery_script
+from audio_buffer import AudioBuffer, MAX_DOWNLOAD_BYTES, audio_uri, delivery_script
 from gi.repository import GLib
 
 
@@ -131,6 +131,23 @@ class AudioBufferTests(unittest.TestCase):
         self.send.assert_called_once_with('fixture-1', 'failed', {})
         self.assertEqual(self.buffer.jobs, {})
 
+    def test_slow_link_stops_only_background_downloads(self):
+        stream = Mock()
+        stream.read_bytes_finish.return_value = GLib.Bytes.new(b'audio')
+        job = self.job(declared=100)
+        job.update(background=True, started=10)
+        with patch('audio_buffer.time.monotonic', return_value=17):
+            self.buffer.received(stream, object(), job)
+        self.send.assert_called_once_with('fixture-1', 'failed', {})
+
+        self.send.reset_mock()
+        job = self.job(declared=100)
+        job.update(background=True, started=10)
+        self.buffer.promote(job['id'])
+        with patch('audio_buffer.time.monotonic', return_value=17):
+            self.buffer.received(stream, object(), job)
+        self.assertEqual(self.send.call_args.args[1], 'chunk')
+
     def test_complete_audio_has_verified_length(self):
         job = self.job(size=3, declared=3)
         stream = Mock()
@@ -139,7 +156,7 @@ class AudioBufferTests(unittest.TestCase):
         self.send.assert_called_once_with('fixture-1', 'complete', {'bytes': 3, 'mime': 'audio/mpeg'})
 
     def test_stream_without_content_length_still_has_size_limit(self):
-        job = self.job(size=MAX_BYTES)
+        job = self.job(size=MAX_DOWNLOAD_BYTES)
         stream = Mock()
         stream.read_bytes_finish.return_value = GLib.Bytes.new(b'x')
         self.buffer.received(stream, object(), job)

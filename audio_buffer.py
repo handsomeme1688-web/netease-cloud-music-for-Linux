@@ -1,11 +1,12 @@
 """Bounded native downloads of the music CDN's already authorized audio URLs."""
 import json
+import time
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import gi
 from gi.repository import Gio, GLib
 
-MAX_BYTES = 192 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = 1024 ** 3
 # Keep native transfers bounded, including large lossless tracks.
 CHUNK_BYTES = 64 * 1024
 
@@ -50,7 +51,7 @@ class AudioBuffer:
             if job.get('stream'):
                 job['stream'].close_async(GLib.PRIORITY_DEFAULT, None, None, None)
 
-    def request(self, identifier, uri):
+    def request(self, identifier, uri, *, background=False):
         safe_uri = audio_uri(uri)
         if (not isinstance(identifier, str) or not identifier or len(identifier) > 64
                 or not all(character.isalnum() or character in '-_' for character in identifier)):
@@ -59,9 +60,14 @@ class AudioBuffer:
             self.send(identifier, 'failed', {})
             return
         job = {'id': identifier, 'uri': safe_uri, 'cancel': Gio.Cancellable(),
-               'size': 0, 'declared': 0, 'redirects': 0, 'stream': None}
+               'size': 0, 'declared': 0, 'redirects': 0, 'stream': None, 'background': background}
         self.jobs[identifier] = job
         self.start(job)
+
+    def promote(self, identifier):
+        job = self.jobs.get(identifier)
+        if job:
+            job['background'] = False
 
     def active(self, job):
         return self.jobs.get(job['id']) is job and not job['cancel'].is_cancelled()
@@ -125,13 +131,14 @@ class AudioBuffer:
         except ValueError:
             self.fail(job)
             return
-        if job['declared'] < 0 or job['declared'] > MAX_BYTES:
+        if job['declared'] < 0 or job['declared'] > MAX_DOWNLOAD_BYTES:
             self.fail(job)
             return
         job['mime'] = (headers.get_one('Content-Type') or 'audio/mpeg').split(';', 1)[0]
         if not (job['mime'].startswith('audio/') or job['mime'] in ('application/octet-stream', 'application/ogg')):
             self.fail(job)
             return
+        job['started'] = time.monotonic()
         # The page uses the announced length to decide how long to wait.
         self.send(job['id'], 'head', {'bytes': job['declared'], 'mime': job['mime']}, lambda: self.read(job))
 
@@ -156,11 +163,23 @@ class AudioBuffer:
             self.send(job['id'], 'complete', {'bytes': job['size'], 'mime': job['mime']})
             return
         job['size'] += len(data)
-        if job['size'] > MAX_BYTES:
+        if job['size'] > MAX_DOWNLOAD_BYTES:
             self.fail(job)
             return
+        if job.get('background'):
+            elapsed = time.monotonic() - job['started']
+            if elapsed >= 6 and job['size'] < elapsed * 384 * 1024:
+                self.fail(job)
+                return
         self.send(job['id'], 'chunk', {'data': data},
-                  lambda: self.read(job))
+                  lambda: self.continue_reading(job))
+
+    def continue_reading(self, job):
+        if job.get('background'):
+            # Yield between reads so speculative songs leave bandwidth available.
+            GLib.timeout_add(16, self.read, job)
+        else:
+            self.read(job)
 
 
 def delivery_script(identifier, event, value):

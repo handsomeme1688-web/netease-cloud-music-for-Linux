@@ -22,10 +22,10 @@
             request.reject(new Error('Complete audio unavailable'));
             return;
         }
-        request.resolve({status: 200, bytes: value.bytes, url: value.url,
+        request.resolve({status: 200, bytes: value.bytes, url: value.url, persisted: value.persisted === true,
             release: () => send({event: 'cancel', id})});
     }});
-    Object.defineProperty(window, '__musicFetchNativeAudio', {value: (url, signal, progress) => new Promise((resolve, reject) => {
+    Object.defineProperty(window, '__musicFetchNativeAudio', {value: (url, signal, progress, background = false) => new Promise((resolve, reject) => {
         const id = prefix + (++counter);
         const abort = () => {
             requests.delete(id);
@@ -35,6 +35,6 @@
         if (signal.aborted) { reject(new DOMException('Audio download cancelled', 'AbortError')); return; }
         requests.set(id, {resolve, reject, signal, abort, progress, size: 0, total: 0});
         signal.addEventListener('abort', abort, {once: true});
-        send({event: 'request', id, url});
+        send({event: 'request', id, url, background});
     })});
 })();
