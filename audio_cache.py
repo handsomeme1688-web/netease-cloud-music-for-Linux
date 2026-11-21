@@ -48,9 +48,9 @@ class AudioCache:
         self.directory = Path(directory) if directory else None
         if self.directory:
             try:
-                self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                self.directory.mkdir(mode=0o700, exist_ok=True)
             except OSError:
-                self.directory = None
+                pass
         self.lock = threading.RLock()
         self.updated = threading.Condition(self.lock)
         self.prefix = '/' + secrets.token_urlsafe(24) + '/'
@@ -157,7 +157,7 @@ class AudioCache:
     def cached_track(self, key):
         path = self.archive_path(key)
         try:
-            if not path.is_file() or path.stat().st_size != key[1]:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size != key[1]:
                 return None
             os.utime(path, None)
         except OSError:
@@ -165,7 +165,7 @@ class AudioCache:
         return path
 
     def store_track(self, key, chunks, size):
-        if not key or key[1] != size:
+        if not self.directory or not key or key[1] != size:
             return None
         temporary = None
         try:

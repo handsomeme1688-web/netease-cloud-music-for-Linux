@@ -1,6 +1,7 @@
 """API and response-policy regression checks without a display or window."""
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -23,7 +24,8 @@ class Controls:
 
 def make_window(view):
     window = SimpleNamespace(
-        webview=view, window_controls=Controls(), get_window=lambda: True)
+        webview=view, window_controls=Controls(), get_window=lambda: True,
+        page_scale=1.0, queue_viewport_fit=Mock())
     window.control_position_ready = lambda *args: app.MusicWindow.control_position_ready(
         window, *args)
     return window
@@ -46,33 +48,37 @@ def make_decision(response, mime_supported=True):
 class LegacyView:
     """Only the API available before WebKitGTK 2.40 is exposed."""
 
-    def __init__(self, center=40, zoom=1.5, error=None):
-        self.zoom = zoom
-        value = SimpleNamespace(to_double=lambda: center)
+    def __init__(self, center=60, error=None):
+        value = SimpleNamespace(to_string=lambda: json.dumps([center, 1, False]))
         result = SimpleNamespace(get_js_value=lambda: value)
         self.run_javascript_finish = Mock(return_value=result, side_effect=error)
 
     def run_javascript(self, script, cancellable, callback, user_data):
         callback(self, "legacy-task", user_data)
 
+    def get_scale_factor(self):
+        return 1
+
     def get_zoom_level(self):
-        return self.zoom
+        return 1
 
 
 class ModernView:
     """The modern completion method returns a JavaScript value directly."""
 
-    def __init__(self, center=35, zoom=2, error=None):
-        self.zoom = zoom
-        value = SimpleNamespace(to_double=lambda: center)
+    def __init__(self, center=70, error=None):
+        value = SimpleNamespace(to_string=lambda: json.dumps([center, 1, False]))
         self.evaluate_javascript_finish = Mock(return_value=value, side_effect=error)
 
     def evaluate_javascript(self, script, length, world, source, cancellable,
                             callback, user_data):
         callback(self, "modern-task", user_data)
 
+    def get_scale_factor(self):
+        return 2
+
     def get_zoom_level(self):
-        return self.zoom
+        return 1
 
 
 class LegacyStyleManager:
