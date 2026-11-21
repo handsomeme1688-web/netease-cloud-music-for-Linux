@@ -5,7 +5,7 @@
 
 **[下载安装包](https://github.com/handsomeme1688-web/netease-cloud-music-for-Linux/releases/latest) · [反馈问题](https://github.com/handsomeme1688-web/netease-cloud-music-for-Linux/issues)**
 
-<img src="https://github.com/user-attachments/assets/598fc2d5-7a3a-4007-83ce-21f54234a8db" alt="网易云音乐播放界面" width="960" />
+<img width="1535" height="980" alt="网易云音乐播放界面" src="https://github.com/user-attachments/assets/f516fe81-33cf-45b8-bd54-305b95ec2c58" />
 
 ## 安装
 
