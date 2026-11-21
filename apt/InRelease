@@ -1,0 +1,27 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+Origin: NetEase Cloud Music for Linux
+Label: NetEase Cloud Music for Linux
+Suite: ./
+Codename: ./
+Date: Sat, 21 Nov 2026 12:20:13 +0000
+Acquire-By-Hash: yes
+Description: NetEase Cloud Music packages for Debian and Ubuntu
+SHA256:
+ c9b2a4c08b345108d5afcdd145a1929e2f97fe415ee1061daa8791f067ca5b16 1193 Packages
+ cd2246ccb760b776ac12eabe9788ed2db92ca11f62e76f13e2287bcd21db2e61 729 Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iQGzBAEBCAAdFiEE2FB1RosFZQlWS3jZ+FJw+Ulh+zsFAmsBjH0ACgkQ+FJw+Ulh
++zvERAwAh9hO+lR3w5IQzuiY4ORVY3fNzXOPCb7TJSWwp9Xtp5aU40gK6ysV8RvE
+T+icX/eRKAT6n0P2ick1qWKG/keHS0gfB+bOpgS2/eC9xARwzeftNNpBIsgA/zmj
+bpUCrKXBxoaq9Wcv6QJ7lRAQ/6mYrXtfO/FX2T+iumUFdurMAsGtyiCrnfMopvLU
+/6cr+8E86n7PNgkIDP9R6aunRYjlWoeAhH6Ft5mKty1uOoTUDUCKUwDlwKT35zEx
+jsb3TRUT3iFOjukNPXNNxR/wMGjggZZuKB5UGxVEkE+DDqe4jfbubpoidx6SgzOp
+NwEbhQahknsz8CS5xMf8hek/SGYPAVZHaS8TAEdeL5YTS/KdEeNlGnx4B3ojgACC
+UmQMKYn0Yso4n9+jn7zDjO5LUyxgUmYEYQ5HzEV1ncmkSl9BE953s54YDbzZCJGs
+dh3zKU7r+ESdSIIu/YEVbYyY5foN97XSb7DBQbgubKptUCBl9hvQB9nvO/oynG3E
+KwS4TdiO
+=D4A5
+-----END PGP SIGNATURE-----
