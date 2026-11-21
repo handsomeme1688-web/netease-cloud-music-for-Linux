@@ -61,6 +61,11 @@ class WebAudioPlaybackTests(unittest.TestCase):
         self.assertEqual(result['loads'],0)
         self.assertEqual(result['state'],'loading')
 
+    def test_failed_preload_retries_through_the_normal_download(self):
+        result = self.snapshot('window.__musicTakePreload=()=>Promise.resolve(null);h.load();')
+        self.assertEqual(result['requests'], 1)
+        self.assertEqual(self.complete()['state'], 'loaded')
+
     def test_routes_only_audio_xhr_and_keeps_requested_source_identity(self):
         self.snapshot('h.load();')
         result=self.complete()

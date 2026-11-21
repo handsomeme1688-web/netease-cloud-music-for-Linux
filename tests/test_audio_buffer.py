@@ -1,5 +1,4 @@
 """Native CDN request boundaries and complete, bounded audio delivery."""
-import base64
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 from types import SimpleNamespace
@@ -68,7 +67,7 @@ class AudioBufferTests(unittest.TestCase):
                 heads.append(data)
                 continuation()
             elif event == 'chunk':
-                chunks.append(base64.b64decode(data['data']))
+                chunks.append(data['data'])
                 continuation()
             else:
                 outcomes.append((event, data))
@@ -119,7 +118,7 @@ class AudioBufferTests(unittest.TestCase):
         self.buffer.received(stream, object(), job)
         identifier, event, data, continuation = self.send.call_args.args
         self.assertEqual((identifier, event), ('fixture-1', 'chunk'))
-        self.assertEqual(base64.b64decode(data['data']), b'abc')
+        self.assertEqual(data['data'], b'abc')
         job['stream'].read_bytes_async.assert_not_called()
         continuation()
         job['stream'].read_bytes_async.assert_called_once()

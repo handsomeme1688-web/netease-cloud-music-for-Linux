@@ -21,6 +21,10 @@
         if (ticket.release) { ticket.release(); ticket.release = null; }
         if (routes.get(ticket.source) === ticket) routes.delete(ticket.source);
         if (tickets.get(howl) === ticket) tickets.delete(howl);
+        report('progress', {howl, loading: false});
+    };
+    const report = (event, detail) => {
+        if (window.dispatchEvent) window.dispatchEvent(new CustomEvent('music-audio-' + event, {detail}));
     };
     // Howler still sees its requested URL. Only its authorized audio XHR is
     // routed to the complete private copy, keeping source and queue identity.
@@ -72,24 +76,34 @@
                 timer: 0, release: null, url: null, started: Date.now(), bytes: -1};
             tickets.set(this, ticket);
             this._state = 'loading';
-            const progress = bytes => {
+            let shown;
+            const progress = (bytes, total) => {
                 if (ticket.controller.signal.aborted || tickets.get(this) !== ticket || bytes <= ticket.bytes) return;
                 ticket.bytes = bytes;
                 clearTimeout(ticket.timer);
                 const remaining = Math.max(1, 900000 - (Date.now() - ticket.started));
                 ticket.timer = setTimeout(() => ticket.controller.abort(), Math.min(30000, remaining));
+                const percent = total ? Math.floor(bytes * 100 / total) : -1;
+                if (percent !== shown) {
+                    shown = percent;
+                    report('progress', {howl: this, bytes, total, loading: true});
+                }
             };
             progress(0);
-            window.__musicFetchNativeAudio(source, ticket.controller.signal, progress).then(response => {
+            const signal = ticket.controller.signal;
+            const prepared = window.__musicTakePreload && window.__musicTakePreload(source, signal, progress);
+            const download = () => window.__musicFetchNativeAudio(source, signal, progress);
+            (prepared ? prepared.then(copy => copy || download()) : download()).then(response => {
                 if (tickets.get(this) !== ticket || ticket.controller.signal.aborted) { response.release(); return; }
                 ticket.url = response.url;
                 ticket.release = response.release;
                 clearTimeout(ticket.timer);
                 routes.set(source, ticket);
+                report('progress', {howl: this, loading: true, decoding: true});
                 this.once('loaderror', () => {
                     if (tickets.get(this) === ticket) {
                         stop(this, ticket);
-                        if (window.dispatchEvent) window.dispatchEvent(new CustomEvent('music-audio-load-error', {detail: this}));
+                        report('load-error', this);
                     }
                 });
                 this.once('load', () => {
@@ -97,6 +111,8 @@
                     // encoded copy as soon as decoding succeeds.
                     if (ticket.release) { ticket.release(); ticket.release = null; }
                     if (routes.get(source) === ticket) routes.delete(source);
+                    report('progress', {howl: this, loading: false});
+                    report('ready', this);
                 });
                 load.call(this);
             }).catch(() => {
@@ -105,7 +121,7 @@
                 this._state = 'unloaded';
                 this._queue = [];
                 this._emit('loaderror', null, 'Audio could not be loaded');
-                if (window.dispatchEvent) window.dispatchEvent(new CustomEvent('music-audio-load-error', {detail: this}));
+                report('load-error', this);
             });
             return this;
         };

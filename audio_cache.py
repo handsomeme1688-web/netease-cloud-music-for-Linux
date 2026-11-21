@@ -1,10 +1,10 @@
 """Private, bounded, range-capable in-memory audio transport."""
-import base64
 import secrets
 import ssl
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from audio_buffer import AudioBuffer, MAX_BYTES
@@ -167,7 +167,7 @@ class AudioCache:
                 entry['reserved'] = requested
                 self.send(identifier, 'head', value)
             elif event == 'chunk':
-                data = base64.b64decode(value['data'])
+                data = value['data']
                 entry['size'] += len(data)
                 entry['reserved'] = max(entry['reserved'], entry['size'])
                 unique = {id(item): item for item in self.entries.values()}.values()
@@ -176,7 +176,10 @@ class AudioCache:
                     self.send(identifier, 'failed', {})
                     return
                 entry['chunks'].append(data)
-                self.send(identifier, 'progress', {'bytes': entry['size']})
+                now = time.monotonic()
+                if now - entry.get('reported_at', 0) >= .25:
+                    entry['reported_at'] = now
+                    self.send(identifier, 'progress', {'bytes': entry['size']})
             elif event == 'complete':
                 entry['data'] = b''.join(entry.pop('chunks'))
                 entry['mime'] = value['mime']

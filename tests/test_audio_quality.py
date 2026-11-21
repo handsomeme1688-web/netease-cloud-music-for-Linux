@@ -71,6 +71,7 @@ const factories={
  consumer:function(module,exports,require){exports.api=require('api');},
  meta:function(module,exports){exports.b={4999:{serverUsedId:"jymaster"},5999:{serverUsedId:"sky"}};exports.d=track=>track.available;},
  maps:function(module,exports){exports.q=new Map([[5999e3,"sky"],[4999e3,"jymaster"]]);exports.p=new Map([['jymaster',4999000]]);exports.b={4999:'jymaster',5999:"sky"};},
+ bridge:function(module,exports){exports.AudioPlayer={getCacheProgressPercent(){return 1;},preLoad(){return this.getCacheProgressPercent();}};},
  resolver:function(module,exports){exports.map=new Map([[5999e3,"sky"]]);exports.b=function(choice){return choice.quality===4999?"jymaster":"exhigh";};}
 };
 '''
@@ -209,6 +210,35 @@ const select=level=>window.qualityTest.choose(window.qualityTest.find(level));
         self.assertTrue(self.evaluate("requireModule('consumer').api.Of===requireModule('api').Of").to_boolean())
         result = self.snapshot("requireModule('consumer').api.Of({ids:['123'],level:'jymaster',encodeType:'mp3'});")
         self.assertEqual(result['requests'][0]['encodeType'], 'flac')
+
+    def test_preload_is_reused_after_the_server_refreshes_the_audio_url(self):
+        self.snapshot('''
+const md5 = 'a'.repeat(32);
+enablePreparation();
+requireModule('bridge').AudioPlayer.preLoad({musicurl:'http://m10.music.126.net/song.flac?old', md5, fileSize:200});
+requireModule('api').Of({ids:['123'],level:'jymaster'});
+''')
+        result = self.snapshot('''
+requests[0].resolve({data:[{id:123,level:'jymaster',url:'https://m10.music.126.net/song.flac?new',md5,size:200}]});
+''')
+        self.assertEqual(len(result['preparations']), 1)
+        result = self.snapshot('''
+const signal = new AbortController().signal;
+window.__musicTakePreload('https://m10.music.126.net/song.flac?new',signal,()=>{}).then(copy=>copy.release());
+preparations[0].resolve({release:()=>released.push(1)});
+''')
+        self.assertEqual(result['released'], [1])
+        self.assertFalse(result['preparations'][0]['aborted'])
+
+    def test_unrelated_playback_discards_preload_and_its_late_result(self):
+        result = self.snapshot('''
+enablePreparation();
+requireModule('bridge').AudioPlayer.preLoad({musicurl:'https://m10.music.126.net/next.flac'});
+window.__musicTakePreload('https://m10.music.126.net/different.flac',new AbortController().signal,()=>{});
+preparations[0].resolve({release:()=>released.push(1)});
+''')
+        self.assertTrue(result['preparations'][0]['aborted'])
+        self.assertEqual(result['released'], [1])
 
     def test_native_bridge_accepts_the_websites_encoded_id_array(self):
         self.create_context(native=True)

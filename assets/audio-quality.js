@@ -51,9 +51,14 @@
         });
     }
     const metadata = new Map(), details = new Map(), patched = new WeakSet(), rows = new Map();
+    const fingerprints = new Map();
+    const sourceKey = url => String(url).replace(/^http:/, 'https:');
+    const fingerprint = (url, hash, size) =>
+        typeof hash === 'string' && /^[a-f0-9]{32}$/i.test(hash) && size > 0 ? hash.toLowerCase() + ':' + size : sourceKey(url);
+    let preload;
     const fields = {standard: 'l', higher: 'm', exhigh: 'h', lossless: 'sq', hires: 'hr',
         jyeffect: 'je', jymaster: 'jm', sky: 'sk', vivid: 'vi'};
-    let tool, store, playerUrl, musicDetail, songQualities, pending, panel, list, footer, anchor, control;
+    let tool, store, playerUrl, musicDetail, songQualities, pending, panel, list, footer, anchor, control, loading;
     let signature = '', scheduled = false, notice = '', lastTrack = '';
     const trackId = state => String(state.playing.resourceTrackId || '');
     const currentHowl = () => window.__musicNativeHowl && window.__musicNativeHowl();
@@ -61,6 +66,42 @@
     const remember = (state, choice) => store.dispatch({type: 'setting/updateQuantity', payload: {
         listen: choice.value, [state.host.isAnonymous ? 'listenAnon' : 'listenReg']: choice.value}});
     const emit = text => { notice = text; sync(); };
+    function discardPreload() {
+        if (!preload) return;
+        const task = preload;
+        preload = null;
+        task.controller.abort();
+        task.download.then(result => { if (result) result.release(); });
+    }
+    function preloadNext(info) {
+        const howl = currentHowl(), url = sourceKey(info.musicurl);
+        if (!howl || howl._state !== 'loaded' || !howl.playing() || pending ||
+            !/^https:\/\/[^/]+\.music\.126\.net\//.test(url) || info.format === 'av3a' ||
+            info.audioFormat === 'av3a' || (store && String(info.songId) === trackId(store.getState())) ||
+            url === sourceKey([].concat(howl._src)[0])) return;
+        const key = fingerprint(url, info.md5, info.fileSize);
+        if (preload && preload.key === key) return;
+        discardPreload();
+        const task = preload = {key, controller: new AbortController(), bytes: 0, total: 0};
+        task.download = window.__musicFetchNativeAudio(url, task.controller.signal, (bytes, total) => {
+            task.bytes = bytes; task.total = total;
+            if (task.progress) task.progress(bytes, total);
+        }).catch(() => {
+            if (preload === task) preload = null;
+            return null;
+        });
+    }
+    Object.defineProperty(window, '__musicTakePreload', {value: (url, signal, progress) => {
+        const task = preload, key = sourceKey(url);
+        if (!task) return null;
+        if ((fingerprints.get(key) || key) !== task.key) { discardPreload(); return null; }
+        preload = null;
+        task.progress = progress;
+        progress(task.bytes, task.total);
+        const abort = () => task.controller.abort();
+        signal.addEventListener('abort', abort, {once: true});
+        return task.download.finally(() => signal.removeEventListener('abort', abort));
+    }});
     function clearPending() {
         if (pending) {
             clearTimeout(pending.timer);
@@ -71,6 +112,14 @@
     }
     function patchExports(module, source, overrides) {
         const exports = module.exports;
+        if (source.includes('getCacheProgressPercent()') && exports.AudioPlayer &&
+            typeof exports.AudioPlayer.preLoad === 'function') {
+            const audio = exports.AudioPlayer, original = audio.preLoad;
+            audio.preLoad = function (info) {
+                if (info && window.__musicFetchNativeAudio) preloadNext(info);
+                return original.apply(this, arguments);
+            };
+        }
         for (const value of Object.values(exports)) {
             if (!value) continue;
             if (typeof value.getDispatch === 'function' && typeof value.getStore === 'function') tool = value;
@@ -101,11 +150,13 @@
                 const response = await (nativeHandler ? requestNative(params, options && options.signal) :
                     request({...params, encodeType: params.level === 'vivid' ? 'mp3' : high ? 'flac' : params.encodeType}, options));
                 for (const item of response && response.data || []) {
+                    if (item.url) fingerprints.set(sourceKey(item.url), fingerprint(item.url, item.md5, item.size));
                     const choice = find(item.level);
                     if (!choice || !item.id) continue;
                     metadata.set(String(item.id) + ':' + choice.value, {bitrate: Number(item.br) || 0});
                 }
                 while (metadata.size > 24) metadata.delete(metadata.keys().next().value);
+                while (fingerprints.size > 24) fingerprints.delete(fingerprints.keys().next().value);
                 return response;
             };
         }
@@ -122,7 +173,7 @@
             const source = factory.toString();
             if (!source.includes('this.app._store.dispatch') && !source.includes('serverUsedId:"jymaster"') &&
                 !source.includes('[[5999e3,"sky"]') && !source.includes('5999:"sky"') &&
-                !source.includes('/api/song/enhance/player/url/v1')) continue;
+                !source.includes('/api/song/enhance/player/url/v1') && !source.includes('getCacheProgressPercent()')) continue;
             const wrapped = function (module, exports, require) {
                 const overrides = {};
                 const adapted = new Proxy(require, {get: (target, key) => key === 'd' ?
@@ -210,6 +261,7 @@
             }
             ticket.actual = actual; ticket.reply = response;
             if (window.__musicFetchNativeAudio) {
+                discardPreload();
                 ticket.phase = 'buffering';
                 let last = -1;
                 const prepared = await window.__musicFetchNativeAudio(audio.url, ticket.controller.signal, (bytes, total) => {
@@ -291,12 +343,13 @@
         const quantity = state.setting.quantity || {};
         const preferred = find(state.host.isAnonymous ? quantity.listenAnon : quantity.listenReg);
         const reasons = choices.map(q => availability(q, state));
-        const next = [id, actual && actual.value, preferred && preferred.value, notice, !!pending, reasons.join(',')].join('|');
+        const next = [id, actual && actual.value, preferred && preferred.value, notice,
+            !!pending, loading && loading.label, reasons.join(',')].join('|');
         if (next === signature) return;
         signature = next;
         for (const button of document.querySelectorAll('.ncm-quality-button')) {
-            button.textContent = pending ? '切换中…' : actual && id ? actual.name : '音质';
-            button.title = actual && id ? '当前音质：' + actual.name : '选择播放音质';
+            button.textContent = loading ? loading.label : pending ? '切换中…' : actual && id ? actual.name : '音质';
+            button.title = loading ? '正在准备整首歌曲' : actual && id ? '当前音质：' + actual.name : '选择播放音质';
         }
         choices.forEach((choice, index) => {
             const row = rows.get(choice.value), reason = reasons[index];
@@ -369,6 +422,20 @@
             if (!panel.hidden && !panel.contains(event.target) && event.target !== anchor) close();
         }, true);
         window.addEventListener('resize', () => { place(); position(); });
+        window.addEventListener('music-audio-progress', ({detail}) => {
+            if (detail.loading) {
+                const percent = detail.total ? Math.min(99, Math.floor(detail.bytes * 100 / detail.total)) : null;
+                loading = {howl: detail.howl, label: detail.decoding ? '解码中…' :
+                    percent === null ? '加载中…' : '加载 ' + percent + '%'};
+            } else if (loading && loading.howl === detail.howl) {
+                loading = null;
+            }
+            sync();
+        });
+        window.addEventListener('music-audio-ready', ({detail: howl}) => setTimeout(() => {
+            if (howl === currentHowl() && howl.playing() && !pending)
+                store.dispatch({type: 'playing/preFetchNext', payload: {}});
+        }, 1000));
         window.addEventListener('music-audio-load-error', event => {
             if (pending && pending.phase === 'switching' && event.detail === currentHowl()) {
                 clearPending(); emit('音质加载失败，请重试或选择其他档位');
@@ -380,7 +447,7 @@
         observer.observe(document.body, {childList: true, subtree: true});
         store.subscribe(sync); place();
         window.addEventListener('pageshow', place);
-        window.addEventListener('pagehide', clearPending);
+        window.addEventListener('pagehide', () => { clearPending(); discardPreload(); });
         return true;
     }
     const STYLE = `

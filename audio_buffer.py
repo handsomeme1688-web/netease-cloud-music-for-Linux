@@ -1,5 +1,4 @@
 """Bounded native downloads of the music CDN's already authorized audio URLs."""
-import base64
 import json
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
@@ -166,7 +165,7 @@ class AudioBuffer:
         if job['size'] > MAX_BYTES:
             self.fail(job)
             return
-        self.send(job['id'], 'chunk', {'data': base64.b64encode(data).decode('ascii')},
+        self.send(job['id'], 'chunk', {'data': data},
                   lambda: self.read(job))
 
 

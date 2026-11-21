@@ -1,5 +1,4 @@
 """Full and partial HTTP reads of private bounded audio copies."""
-import base64
 import ssl
 import socket
 from urllib.request import build_opener, ProxyHandler, Request, HTTPSHandler
@@ -36,7 +35,7 @@ class AudioCacheTests(unittest.TestCase):
     def store(self, identifier='one', data=b'0123456789'):
         self.cache.request(identifier,'https://m10.music.126.net/fixture.mp3')
         self.cache.receive(identifier,'head',{'bytes':len(data)})
-        self.cache.receive(identifier,'chunk',{'data':base64.b64encode(data).decode()})
+        self.cache.receive(identifier,'chunk',{'data':data})
         self.cache.receive(identifier,'complete',{'bytes':len(data),'mime':'audio/mpeg'})
         return self.send.call_args.args[2]['url']
 
@@ -126,6 +125,6 @@ class AudioCacheTests(unittest.TestCase):
         with patch('audio_cache.MAX_BYTES',4):
             self.cache.request('one','https://m10.music.126.net/fixture.mp3')
             self.cache.receive('one','head',{'bytes':0})
-            self.cache.receive('one','chunk',{'data':base64.b64encode(b'12345').decode()})
+            self.cache.receive('one','chunk',{'data':b'12345'})
             self.assertNotIn('one',self.cache.entries)
             self.send.assert_called_with('one','failed',{})
