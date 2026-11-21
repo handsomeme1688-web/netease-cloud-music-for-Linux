@@ -19,7 +19,12 @@ const intervals=[],timers=new Map();let timerId=0;
 const setInterval=fn=>(intervals.push(fn),intervals.length),clearInterval=()=>{};
 const setTimeout=(fn,delay)=>{timers.set(++timerId,{fn,delay});return timerId;};
 const clearTimeout=id=>timers.delete(id),requestAnimationFrame=fn=>fn();
-const window={addEventListener:()=>{}},innerWidth=1280,innerHeight=840;
+const listeners=new Map();
+const window={
+ addEventListener(name,fn){listeners.set(name,[...(listeners.get(name)||[]),fn]);},
+ dispatchEvent(event){for(const listener of listeners.get(event.type)||[])listener(event);}
+},innerWidth=1280,innerHeight=840;
+class CustomEvent{constructor(type,{detail}){this.type=type;this.detail=detail;}}
 const getComputedStyle=()=>({color:'rgb(40,40,40)',getPropertyValue:()=> 'rgb(40,40,40)'});
 class Element{
  constructor(tag){this.tagName=tag;this.children=[];this.dataset={};this.style={setProperty(name,value){this[name]=value;}};this.attrs={};this.events={};this.textContent='';this.disabled=false;}
@@ -67,6 +72,7 @@ const actions=[],subscribers=[],requests=[],detailRequests=[],nativeMessages=[];
 const store={getState:()=>state,subscribe:fn=>(subscribers.push(fn),()=>{}),notify:()=>subscribers.forEach(fn=>fn()),
  dispatch:action=>{actions.push(action);
   if(action.type==='setting/updateQuantity')Object.assign(state.setting.quantity,action.payload);
+  if(action.type==='playing/onLoadingSeekUpdate')Object.assign(state.playing,action.payload);
   if(action.type==='playing/pause'){howl.paused=true;state.playing.playingState=1;}
   store.notify();return action;
  }};
@@ -76,7 +82,7 @@ const howl={_state:'loaded',paused:false,seek:()=>42.5,playing:()=>!howl.paused,
 window.__musicNativeHowl=()=>howl;
 const preparations=[],released=[];
 class AbortController{constructor(){const listeners=new Set();this.signal={aborted:false,addEventListener:(_,fn)=>listeners.add(fn),removeEventListener:(_,fn)=>listeners.delete(fn)};this.listeners=listeners;}abort(){this.signal.aborted=true;for(const fn of this.listeners)fn();}}
-const enablePreparation=()=>{window.__musicFetchNativeAudio=(url,signal,progress)=>new Promise((resolve,reject)=>preparations.push({url,signal,progress,resolve,reject}));};
+const enablePreparation=()=>{window.__musicFetchNativeAudio=(url,signal,progress,background)=>new Promise((resolve,reject)=>preparations.push({url,signal,progress,background,resolve,reject}));};
 const modules={},cache={};
 function requireModule(id){if(cache[id])return cache[id].exports;const m=cache[id]={exports:{}};modules[id](m,m.exports,requireModule);return m.exports;}
 requireModule.d=(exports,key,getter)=>Object.defineProperty(exports,key,{enumerable:true,get:getter});
@@ -87,6 +93,11 @@ const factories={
  meta:function(module,exports){exports.b={4999:{serverUsedId:"jymaster"},5999:{serverUsedId:"sky"}};exports.d=track=>track.available;},
  maps:function(module,exports){exports.q=new Map([[5999e3,"sky"],[4999e3,"jymaster"]]);exports.p=new Map([['jymaster',4999000]]);exports.b={4999:'jymaster',5999:"sky"};},
  bridge:function(module,exports){exports.AudioPlayer={getCacheProgressPercent(){return 1;},preLoad(){return this.getCacheProgressPercent();}};},
+ progress:function(module,exports){
+  const subject=value=>({getValue:()=>value,next:next=>{value=next;},asObservable(){return this;}});
+  exports.b=subject(false);exports.c=subject({inSeek:!1});exports.d=subject(null);
+  exports.d.asObservable();
+ },
  resolver:function(module,exports){exports.map=new Map([[5999e3,"sky"]]);exports.b=function(choice){return choice.quality===4999?"jymaster":"exhigh";};}
 };
 '''
@@ -131,7 +142,7 @@ const select=level=>window.qualityTest.choose(window.qualityTest.find(level));
         return json.loads(self.evaluate('''JSON.stringify({actions,nativeMessages,released,preparations:preparations.map(p=>({aborted:p.signal.aborted})),requests:requests.map(r=>r.params),
  preference:state.setting.quantity.listenReg,
  button:document.body.querySelector('.ncm-quality-mini').textContent,
- settings:document.body.querySelector('.ncm-quality-setting').textContent,
+ settings:settings.querySelectorAll('.ncm-quality-setting-radio').find(input=>input.checked)?.parentNode.children[1].textContent,
  detail:document.body.querySelector('.ncm-quality-detail').textContent,
  footer:document.body.querySelector('.ncm-quality-footer').textContent,
  rows:document.body.querySelectorAll('.ncm-quality-row').map(r=>({level:r.dataset.level,disabled:r.disabled,checked:r.getAttribute('aria-checked')}))})''').to_string())
@@ -140,11 +151,12 @@ const select=level=>window.qualityTest.choose(window.qualityTest.find(level));
         data = dict(id=123, url='https://m10.music.126.net/music.flac', level=level, br=1234000, **extra)
         return self.snapshot('requests[0].resolve({code:200,data:[%s]});' % json.dumps(data))
 
-    def test_each_entry_reuses_one_menu_with_nine_choices(self):
+    def test_settings_show_nine_choices_and_playback_buttons_share_one_menu(self):
         result = self.snapshot('window.qualityTest.place();window.qualityTest.place();')
         self.assertEqual(len(result['rows']), 9)
-        self.assertEqual(self.evaluate("document.body.querySelectorAll('.ncm-quality-button').length").to_int32(), 3)
-        self.assertEqual(self.evaluate("settings.querySelectorAll('.ncm-quality-setting').length").to_int32(), 1)
+        self.assertEqual(self.evaluate("document.body.querySelectorAll('.ncm-quality-button').length").to_int32(), 2)
+        self.assertEqual(self.evaluate("settings.querySelectorAll('.ncm-quality-setting-radio').length").to_int32(), 9)
+        self.assertEqual(self.evaluate("settings.querySelectorAll('.ncm-quality-setting-radio').filter(input=>input.checked).length").to_int32(), 1)
 
     def test_vivid_extends_request_and_response_mapping(self):
         self.assertEqual(self.evaluate("requireModule('maps').q.get(6999000)").to_string(), 'vivid')
@@ -204,6 +216,31 @@ const select=level=>window.qualityTest.choose(window.qualityTest.find(level));
         result = self.snapshot('state.playing.resourcePlayingQuality=999;store.notify();')
         self.assertEqual(result['released'],[1])
 
+    def test_streaming_quality_switch_resumes_at_current_position_before_completion(self):
+        self.evaluate('''
+const messages=[];
+window.webkit={messageHandlers:{streamPlayer:{postMessage:value=>messages.push(JSON.parse(value))}}};
+''')
+        self.evaluate((Path(__file__).resolve().parents[1] / 'assets/native-streaming.js').read_text())
+        self.snapshot('enablePreparation();select("lossless");')
+        self.snapshot('''
+const url='https://m10.music.126.net/file-without-extension';
+requests[0].resolve({code:200,data:[{id:123,url,level:'lossless',type:'flac',time:120000}]});
+''')
+        result = self.snapshot('preparations[0].progress(300000,1200000);')
+        self.assertEqual([action['type'] for action in result['actions']], ['setting/updateQuantity'])
+        self.assertTrue(self.evaluate('howl.playing()').to_boolean())
+        result = self.snapshot('howl.seek=()=>45;preparations[0].progress(470000,1200000);')
+        self.assertEqual(len(result['actions']), 1)
+        result = self.snapshot('preparations[0].progress(490000,1200000);')
+        self.assertEqual(result['actions'][-1]['type'], 'playing/switchQuality')
+        self.assertEqual(result['actions'][-1]['payload']['current'], 45)
+        self.assertFalse(result['preparations'][0]['aborted'])
+        self.evaluate("window.__musicStreamingHowl({}, {autoplay:true}, url);")
+        self.assertEqual(self.evaluate("messages.find(m=>m.event==='load').position").to_int32(), 45)
+        result = self.snapshot('state.playing.resourcePlayingQuality=999;store.notify();')
+        self.assertTrue(result['preparations'][0]['aborted'])
+
     def test_prepared_reply_is_reused_only_for_the_matching_song_and_level(self):
         self.snapshot('enablePreparation();select("lossless");')
         self.complete('lossless')
@@ -226,6 +263,69 @@ const select=level=>window.qualityTest.choose(window.qualityTest.find(level));
         self.complete('lossless')
         result = self.snapshot('state.playing.resourceTrackId=456;store.notify();')
         self.assertEqual(result['actions'][-1],{'type':'playing/onLoadingSeekUpdate','payload':{'loadingSeekDuration':0}})
+
+    def test_pending_seek_stays_with_its_own_song(self):
+        self.snapshot('state.playing.loadingSeekDuration=96;store.notify();')
+        self.assertEqual(self.evaluate('state.playing.loadingSeekDuration').to_int32(), 96)
+        self.snapshot('state.playing.resourceTrackId=456;store.notify();')
+        self.assertEqual(self.evaluate('state.playing.loadingSeekDuration').to_int32(), 0)
+        self.snapshot('''
+state.playing.resourceTrackId=789;
+state.playing.restoreResource={trackId:789};
+state.playing.loadingSeekDuration=31;
+store.notify();
+''')
+        self.assertEqual(self.evaluate('state.playing.loadingSeekDuration').to_int32(), 31)
+
+    def test_native_clock_unfreezes_the_next_song_and_ignores_stale_ticks(self):
+        self.evaluate('''
+const messages=[];
+window.webkit={messageHandlers:{streamPlayer:{postMessage:message=>messages.push(JSON.parse(message))}}};
+window.__musicNativeHowl=()=>window.__musicStreamingActive();
+''')
+        path = Path(__file__).resolve().parents[1] / 'assets/native-streaming.js'
+        self.evaluate(path.read_text())
+        self.evaluate('''
+const channel=requireModule('progress');
+const send=(id,event,position,buffering=false)=>window.__musicStreamEvent(
+ id,event,{position,duration:120,bytes:1,total:2,playing:true,buffering});
+const oldSong={};
+window.__musicStreamingHowl(oldSong,{autoplay:true},'https://m10.music.126.net/old.mp3');
+const oldId=messages[0].id;
+send(oldId,'load',0);
+send(oldId,'tick',9);
+channel.b.next(true);
+send(oldId,'tick',9,true);
+state.playing.resourceTrackId=456;
+state.playing.playId='123_stalled';
+store.notify();
+send(oldId,'tick',10);
+''')
+        self.assertTrue(self.evaluate('channel.b.getValue()').to_boolean())
+        self.assertEqual(self.evaluate('channel.d.getValue().current').to_int32(), 9)
+        self.evaluate('''
+oldSong.unload();
+const nextSong={};
+window.__musicStreamingHowl(nextSong,{autoplay:true},'https://m10.music.126.net/next.mp3');
+const nextId=messages.find(message=>message.url?.endsWith('next.mp3')).id;
+send(nextId,'load',0);
+send(oldId,'tick',85);
+send(nextId,'tick',1.6);
+''')
+        self.assertFalse(self.evaluate('channel.b.getValue()').to_boolean())
+        self.assertEqual(self.evaluate('channel.d.getValue().playId').to_string(), '456')
+        self.assertAlmostEqual(self.evaluate('channel.d.getValue().current').to_double(), 1.6)
+        self.evaluate('''
+channel.c.next({inSeek:true});
+channel.b.next(true);
+send(nextId,'tick',2.1);
+channel.c.next({inSeek:false});
+send(nextId,'tick',2.1,true);
+''')
+        self.assertTrue(self.evaluate('channel.b.getValue()').to_boolean())
+        self.assertAlmostEqual(self.evaluate('channel.d.getValue().current').to_double(), 1.6)
+        self.evaluate("send(nextId,'tick',2.4);")
+        self.assertAlmostEqual(self.evaluate('channel.d.getValue().current').to_double(), 2.4)
 
     def test_circular_imports_share_the_same_quality_request(self):
         self.assertTrue(self.evaluate("requireModule('consumer').api.Of===requireModule('api').Of").to_boolean())
@@ -261,6 +361,71 @@ preparations[0].resolve({release:()=>released.push(1)});
         self.assertTrue(result['preparations'][0]['aborted'])
         self.assertEqual(result['released'], [1])
 
+    def test_transition_prepares_before_download_finishes_and_checks_the_next_song(self):
+        self.snapshot('''
+enablePreparation();
+state.playing.playingMode='playOrder';
+state.playing.curPlaying.resourceId='current';
+state.playingList={curPlayingList:[
+ {resourceId:'current',displayOrder:1},{resourceId:'next',displayOrder:2}
+]};
+const transitions=[];
+window.__musicPrepareTransition=(audio,url,duration,valid)=>transitions.push({audio,url,duration,valid});
+requireModule('bridge').AudioPlayer.preLoad({songId:'next',songDuration:'210000',musicurl:'https://m10.music.126.net/next.flac'});
+''')
+        self.assertTrue(self.evaluate('transitions.length===1 && transitions[0].duration===210').to_boolean())
+        self.assertTrue(self.evaluate('''
+state.playingList.curPlayingList=state.playingList.curPlayingList.map(entry=>({...entry}));
+transitions[0].valid()
+''').to_boolean())
+        self.assertFalse(self.evaluate('state.playingList.curPlayingList=[]; transitions[0].valid()').to_boolean())
+
+    def test_confirmed_mix_reuses_the_authorized_next_song_url(self):
+        self.create_context(native=True)
+        self.snapshot('''
+enablePreparation();
+state.playing.playingMode='playCycle';
+state.playing.curPlaying.resourceId='123';
+state.playingList={curPlayingList:[
+ {resourceId:'123',displayOrder:1},{resourceId:'456',displayOrder:2}
+]};
+const source='https://m10.music.126.net/next.flac';
+const query=()=>requireModule('api').Of({ids:['456'],level:'lossless'});
+query();
+window.__musicQualityResponse(nativeMessages[0].id,{code:200,data:[
+ {id:456,code:200,url:source,expi:1200,level:'lossless'}
+]});
+''')
+        result = self.snapshot('''
+window.__musicPrepareTransition=(audio,url,duration,valid)=>valid();
+requireModule('bridge').AudioPlayer.preLoad({songId:456,songDuration:210000,musicurl:source});
+let mixedSource;
+query().then(response=>{mixedSource=response.data[0].url;});
+''')
+        self.assertEqual(len(result['nativeMessages']), 1)
+        self.assertEqual(self.evaluate('mixedSource').to_string(), 'https://m10.music.126.net/next.flac')
+
+    def test_prefetches_three_songs_in_sequence_and_yields_when_the_song_changes(self):
+        self.snapshot('''
+enablePreparation();
+state.playing.playingMode='playOrder';
+state.playingList={curPlayingList:[123,456,789,101,102].map((id,displayOrder)=>({resourceId:id,displayOrder}))};
+requireModule('bridge').AudioPlayer.preLoad({songId:456,musicurl:'https://m10.music.126.net/456.mp3'});
+preparations[0].resolve({persisted:true,release:()=>{}});
+''')
+        self.assertEqual(self.evaluate("requests[0].params.ids.join(',')").to_string(), '789,101')
+        self.snapshot('''
+requests[0].resolve({code:200,data:[789,101].map(id=>({
+ id,code:200,url:'https://m10.music.126.net/'+id+'.mp3',type:'mp3'
+}))});
+''')
+        self.assertTrue(self.evaluate("preparations.length===2 && preparations[1].background").to_boolean())
+        self.snapshot('preparations[1].resolve({persisted:true,release:()=>released.push(789)});')
+        self.assertTrue(self.evaluate("preparations.length===3 && preparations[2].url.endsWith('/101.mp3')").to_boolean())
+        result = self.snapshot("window.__musicDiscardPreload('https://m10.music.126.net/other.mp3');")
+        self.assertTrue(result['preparations'][2]['aborted'])
+        self.assertEqual(result['released'], [789])
+
     def test_native_bridge_accepts_the_websites_encoded_id_array(self):
         self.create_context(native=True)
         result = self.snapshot("requireModule('consumer').api.Of({ids:['[123]'],level:'jymaster'});")
@@ -291,6 +456,27 @@ preparations[0].resolve({release:()=>released.push(1)});
         result = self.snapshot('select("vivid");')
         self.assertTrue(next(row for row in result['rows'] if row['level']=='vivid')['disabled'])
         self.assertEqual(result['requests'], [])
+
+    def test_failed_native_lookup_uses_the_original_web_request(self):
+        self.create_context(native=True)
+        result = self.snapshot('''
+const params={ids:['123'],level:'lossless'};
+requireModule('api').Of(params);
+window.__musicQualityResponse(nativeMessages[0].id,null);
+requireModule('api').Of(params);
+window.__musicQualityResponse(nativeMessages[1].id,{code:200,data:[{id:123,url:null}]});
+''')
+        self.assertEqual(result['requests'], [dict(ids=['123'], level='lossless', encodeType='flac')] * 2)
+
+    def test_new_stream_releases_only_unrelated_preloads_before_loading(self):
+        result = self.snapshot('''
+enablePreparation();
+requireModule('bridge').AudioPlayer.preLoad({musicurl:'https://m10.music.126.net/next.flac'});
+window.__musicDiscardPreload('http://m10.music.126.net/next.flac');
+''')
+        self.assertFalse(result['preparations'][0]['aborted'])
+        result = self.snapshot("window.__musicDiscardPreload('https://m10.music.126.net/other.flac');")
+        self.assertTrue(result['preparations'][0]['aborted'])
         self.assertEqual(result['actions'], [])
 
     def test_failed_preflight_preserves_current_audio_and_saves_default(self):
@@ -354,8 +540,9 @@ for(const timer of [...timers.values()])if(timer.delay===0)timer.fn();
 
     def test_settings_and_both_playback_buttons_share_one_selection(self):
         result = self.snapshot('''
-document.body.querySelector('.ncm-quality-setting').click();
-document.body.querySelectorAll('.ncm-quality-row').find(row=>row.dataset.level==='lossless').click();
+const radio=settings.querySelectorAll('.ncm-quality-setting-radio').find(input=>input.value==='999');
+radio.checked=true;
+radio.events.change();
 ''')
         self.assertEqual(result['settings'], '无损')
         self.assertEqual(result['requests'][0]['level'], 'lossless')

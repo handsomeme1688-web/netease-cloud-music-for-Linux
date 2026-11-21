@@ -7,15 +7,20 @@
     if (!handler) return;
     let active = null, nextId = 0;
     const report = (name, detail) => window.dispatchEvent(new CustomEvent('music-audio-' + name, {detail}));
-    const post = (id, event, value, url) => handler.postMessage(JSON.stringify({id, event, value, url}));
+    const post = (id, event, value, url, position) =>
+        handler.postMessage(JSON.stringify({id, event, value, url, position}));
+    const formats = new Set(['mp3', 'flac', 'm4a', 'aac', 'ogg', 'wav']);
+    const canStream = (source, format) => formats.has(format ||
+        /\.([^./?#]+)$/.exec(source.split(/[?#]/, 1)[0])?.[1].toLowerCase());
+    Object.defineProperty(window, '__musicCanStreamSource', {value: canStream});
 
     function adapt(howl, options, source) {
-        if (!/\.(mp3|flac|m4a|aac|ogg|wav)(?:[?#]|$)/i.test(source)) return false;
-        const id = Date.now().toString(36) + '-' + (++nextId);
+        if (!canStream(source, window.__musicStreamType?.(source))) return false;
+        let id;
         const handlers = new Map();
         let position = 0, duration = 0, bytes = 0, total = 0, wanted = false;
         let started = false, prefetch = false, volume = options.volume ?? 1, muted = !!options.mute;
-        let rate = options.rate || 1, loaded = false, lastProgress;
+        let rate = options.rate || 1, loaded = false, earlyEnd = false, lastProgress, canMix;
         const on = (name, fn, once) => {
             if (typeof fn === 'function') {
                 if (!handlers.has(name)) handlers.set(name, []);
@@ -59,6 +64,7 @@
                 report('load-error', howl);
                 return;
             }
+            const previousPosition = position;
             ({position, duration, bytes, total} = state);
             howl._buffering = state.buffering;
             if (event === 'load') {
@@ -72,13 +78,28 @@
                 emit('play');
             }
             if (event === 'seek') emit('seek');
-            if (event === 'end') {
+            if (event === 'transition' || event === 'advance') {
+                if (!wanted || !started || !canMix || !canMix()) {
+                    post(id, 'discard-prepare');
+                    return;
+                }
+                if (event === 'transition') {
+                    post(id, 'mix');
+                    return;
+                }
+                earlyEnd = true;
+            }
+            if (event === 'advance' || event === 'end' && !earlyEnd) {
                 wanted = started = false;
                 emit('end');
             }
             // Once loaded, seek buffering belongs to the playback state.
             progress(!loaded);
-            if (!prefetch && started && wanted && total && bytes >= total) {
+            if (event === 'tick' && loaded && wanted && state.playing && !state.buffering &&
+                position > 0 && position !== previousPosition) {
+                report('clock', {howl, position, cacheProgress: total ? Math.min(1, bytes / total) : 0});
+            }
+            if (!prefetch && !state.transitioning && started && wanted && total && bytes >= total) {
                 prefetch = true;
                 report('ready', howl);
             }
@@ -94,15 +115,26 @@
             state: () => howl._state,
             load() {
                 if (howl._state !== 'unloaded') return howl;
-                active = {id, howl, accept};
+                id = Date.now().toString(36) + '-' + (++nextId);
+                position = duration = bytes = total = 0;
+                loaded = wanted = started = earlyEnd = prefetch = false;
+                lastProgress = canMix = undefined;
+                howl._buffering = false;
+                active = {id, howl, accept, prepare(url, duration, valid) {
+                    canMix = valid;
+                    post(id, 'prepare', duration, url);
+                }};
                 howl._state = 'loading';
+                report('stream-open', howl);
                 progress(true);
-                post(id, 'load', gain(), source);
-                if (window.__musicDiscardPreload) window.__musicDiscardPreload();
+                window.__musicDiscardPreload?.(source);
+                post(id, 'load', gain(), source, window.__musicStreamStartPosition?.(source));
+                window.__musicDiscardPreload?.();
                 return howl;
             },
             play() {
                 if (howl._state === 'unloaded') howl.load();
+                earlyEnd = false;
                 wanted = true;
                 post(id, 'play');
                 return 1;
@@ -116,6 +148,7 @@
             },
             stop() {
                 wanted = started = false;
+                position = 0;
                 post(id, 'stop');
                 emit('stop');
                 return howl;
@@ -161,6 +194,9 @@
     Object.defineProperties(window, {
         __musicStreamingHowl: {value: adapt},
         __musicStreamingActive: {value: () => active && active.howl},
+        __musicPrepareTransition: {value: (howl, url, duration, valid) => {
+            if (active && active.howl === howl) active.prepare(url, duration, valid);
+        }},
         __musicStreamEvent: {value: (id, event, state) => {
             if (active && active.id === id) active.accept(event, state);
         }}

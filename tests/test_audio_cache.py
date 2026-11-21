@@ -91,7 +91,7 @@ class AudioCacheTests(unittest.TestCase):
         error.exception.close()
 
     def test_pending_and_completed_copies_share_one_budget(self):
-        with patch('audio_cache.MAX_BYTES',16):
+        with patch('audio_cache.MAX_MEMORY_BYTES',16):
             self.store(data=b'1234567890')
             self.cache.request('two','https://m10.music.126.net/other.mp3')
             self.cache.receive('two','head',{'bytes':10})
@@ -110,7 +110,7 @@ class AudioCacheTests(unittest.TestCase):
             self.assertEqual(response.read(),b'0123456789')
 
     def test_shared_copy_is_counted_once_in_the_byte_budget(self):
-        with patch('audio_cache.MAX_BYTES',16):
+        with patch('audio_cache.MAX_MEMORY_BYTES',16):
             self.store()
             self.cache.request('player','https://m10.music.126.net/fixture.mp3')
             self.cache.request('next','https://m10.music.126.net/next.mp3')
@@ -125,7 +125,7 @@ class AudioCacheTests(unittest.TestCase):
         self.send.assert_called_with('copy7','failed',{})
 
     def test_unknown_length_downloads_are_also_bounded(self):
-        with patch('audio_cache.MAX_BYTES',4):
+        with patch('audio_cache.MAX_MEMORY_BYTES',4):
             self.cache.request('one','https://m10.music.126.net/fixture.mp3')
             self.cache.receive('one','head',{'bytes':0})
             self.cache.receive('one','chunk',{'data':b'12345'})
@@ -205,7 +205,8 @@ class AudioCacheTests(unittest.TestCase):
         self.cache.cancel('prefetch')
         self.cache.client.request.assert_called_once_with('prefetch', first)
         self.cache.client.cancel.assert_not_called()
-        url = stream.call_args.args[1]['url']
+        url = next(call.args[1]['url'] for call in stream.call_args_list if call.args[0] == 'source')
+        stream.assert_called_with('progress', {'bytes': 6})
         with self.opener.open(Request(url, headers={'Range': 'bytes=2-4'})) as response:
             self.assertEqual(response.read(), b'234')
         self.cache.receive('prefetch', 'chunk', {'data': b'6789'})
@@ -221,16 +222,78 @@ class AudioCacheTests(unittest.TestCase):
             self.assertEqual(response.read(), b'0123456789')
         self.assertEqual(list(directory.iterdir()), [])
 
-    def test_archive_prunes_least_recently_used_tracks(self):
+    def test_large_tracks_stream_from_disk_during_concurrent_downloads(self):
         directory = self.archive()
-        with patch('audio_cache.DISK_LIMIT', 20):
-            for index in range(3):
-                uri = f'https://m10.music.126.net/{index}.mp3'
-                data = bytes([index]) * 10
-                self.cache.authorize_sources(self.source(uri, data))
-                self.store('archive', data, uri)
-                self.cache.cancel('archive')
-        self.assertEqual(len(list(directory.iterdir())), 2)
+        first = 'https://m10.music.126.net/one.flac'
+        second = 'https://m10.music.126.net/two.flac'
+        data = b'0123456789' * 4
+        self.cache.authorize_sources(self.source(first, data, type='flac'))
+        self.cache.authorize_sources(self.source(second, data[::-1], type='flac'))
+        with patch('audio_cache.MAX_MEMORY_BYTES', 16):
+            for identifier, url in [('one', first), ('two', second)]:
+                stream = Mock()
+                self.cache.request(identifier, url, stream)
+                self.cache.receive(identifier, 'head', {'bytes': len(data)})
+                prefix = data[:20] if identifier == 'one' else data[::-1][:20]
+                self.cache.receive(identifier, 'chunk', {'data': prefix})
+                source = next(call.args[1]['url'] for call in stream.call_args_list if call.args[0] == 'source')
+                with self.opener.open(Request(source, headers={'Range': 'bytes=5-15'})) as response:
+                    self.assertEqual(response.read(), prefix[5:16])
+            self.cache.receive('one', 'chunk', {'data': data[20:]})
+            self.cache.receive('one', 'complete', {'bytes': len(data), 'mime': 'audio/flac'})
+            self.cache.cancel('two')
+        self.assertEqual([file.read_bytes() for file in directory.iterdir()], [data])
+        self.cache.cancel('one')
+        with patch.object(self.cache.client, 'request') as download:
+            self.cache.request('replay', first)
+            download.assert_not_called()
+
+    def test_archive_retains_tracks_past_the_old_file_limit(self):
+        directory = self.archive()
+        for index in range(66):
+            uri = f'https://m10.music.126.net/{index}.mp3'
+            data = bytes([index]) * 10
+            self.cache.authorize_sources(self.source(uri, data))
+            self.store('archive', data, uri)
+            self.cache.cancel('archive')
+        self.assertEqual(len(list(directory.iterdir())), 66)
         with patch.object(self.cache.client, 'request') as request:
+            self.cache.authorize_sources(self.source('https://m10.music.126.net/0.mp3', bytes(10)))
             self.cache.request('first', 'https://m10.music.126.net/0.mp3')
-            request.assert_called_once()
+            request.assert_not_called()
+
+    def test_background_yields_to_foreground_and_promotes_matching_download(self):
+        self.archive()
+        one = 'https://m10.music.126.net/one.mp3'
+        other = 'https://m10.music.126.net/other.mp3'
+        self.cache.authorize_sources(self.source(one))
+        self.cache.authorize_sources(self.source(other, b'abcdefghij'))
+        with patch('audio_cache.Gio.NetworkMonitor.get_default') as monitor:
+            monitor.return_value.get_network_metered.return_value = False
+            self.cache.request('background', one, background=True)
+            self.cache.request('while-busy', other, background=True)
+            self.send.assert_called_with('while-busy', 'failed', {})
+            self.cache.request('play', one, Mock())
+            self.cache.client.request.assert_called_once_with('background', one, background=True)
+            self.cache.client.promote.assert_called_once_with('background')
+            self.cache.cancel('background')
+            self.cache.cancel('play')
+            self.cache.request('speculative', one, background=True)
+            self.cache.request('foreground', other, Mock())
+            self.assertIn('foreground', self.cache.entries)
+            self.assertNotIn('speculative', self.cache.entries)
+            self.cache.client.cancel.assert_called_with('speculative')
+
+    def test_background_completion_persists_after_releasing_the_copy(self):
+        directory = self.archive()
+        uri = 'https://m10.music.126.net/one.mp3'
+        self.cache.authorize_sources(self.source(uri))
+        with patch('audio_cache.Gio.NetworkMonitor.get_default') as monitor:
+            monitor.return_value.get_network_metered.return_value = False
+            self.cache.request('background', uri, background=True)
+            self.cache.receive('background', 'head', {'bytes': 10})
+            self.cache.receive('background', 'chunk', {'data': b'0123456789'})
+            self.cache.receive('background', 'complete', {'bytes': 10, 'mime': 'audio/mpeg'})
+        self.assertTrue(self.send.call_args.args[2]['persisted'])
+        self.cache.cancel('background')
+        self.assertEqual([file.read_bytes() for file in directory.iterdir()], [b'0123456789'])

@@ -52,17 +52,31 @@
     }
     const metadata = new Map(), details = new Map(), patched = new WeakSet(), rows = new Map();
     const fingerprints = new Map();
+    const sourceReplies = new Map();
+    const sourceTypes = new Map();
     const sourceKey = url => String(url).replace(/^http:/, 'https:');
     const fingerprint = (url, hash, size) =>
         typeof hash === 'string' && /^[a-f0-9]{32}$/i.test(hash) && size > 0 ? hash.toLowerCase() + ':' + size : sourceKey(url);
-    let preload;
+    let preload, lookahead;
     const fields = {standard: 'l', higher: 'm', exhigh: 'h', lossless: 'sq', hires: 'hr',
         jyeffect: 'je', jymaster: 'jm', sky: 'sk', vivid: 'vi'};
     let tool, store, playerUrl, musicDetail, songQualities, pending, deferred, panel, list, footer, anchor, loading;
-    let control, detailControl, settingControl, settingRow;
+    let progressChannel;
+    const streamOwners = new WeakMap();
+    let control, detailControl, settingRow, settingStatus;
+    const settingChoices = new Map();
     let signature = '', scheduled = false, notice = '', lastTrack = '';
     const trackId = state => String(state.playing.resourceTrackId || '');
+    const resourceId = state => String(state.playing.curPlaying?.resourceId || trackId(state));
     const currentHowl = () => window.__musicNativeHowl && window.__musicNativeHowl();
+    const currentPosition = () => {
+        const position = Number(currentHowl()?.seek());
+        return Number.isFinite(position) ? Math.max(0, position) : 0;
+    };
+    Object.defineProperty(window, '__musicStreamType', {value: url => sourceTypes.get(sourceKey(url))});
+    Object.defineProperty(window, '__musicStreamStartPosition', {value: url =>
+        pending?.phase === 'switching' && pending.url === sourceKey(url) &&
+        pending.track === trackId(store.getState()) ? pending.position : undefined});
     const preference = state => {
         const quantity = state.setting.quantity || {};
         return find(state.host.isAnonymous ? quantity.listenAnon : quantity.listenReg) || find(quantity.listen);
@@ -71,14 +85,98 @@
     const remember = (state, choice) => store.dispatch({type: 'setting/updateQuantity', payload: {
         listen: choice.value, [state.host.isAnonymous ? 'listenAnon' : 'listenReg']: choice.value}});
     const emit = text => { notice = text; sync(); };
-    function discardPreload() {
+    function discardPreload(keepSource) {
+        const url = keepSource && sourceKey(keepSource);
+        const key = url && (fingerprints.get(url) || url);
+        if (lookahead && (!key || lookahead.key !== key)) {
+            lookahead.controller.abort();
+            lookahead = null;
+        }
         if (!preload) return;
+        if (key === preload.key) return;
         const task = preload;
         preload = null;
         task.controller.abort();
         task.download.then(result => { if (result) result.release(); });
     }
     Object.defineProperty(window, '__musicDiscardPreload', {value: discardPreload});
+    function upcomingTracks(state) {
+        const mode = state.playing.playingMode;
+        const list = state.playingList?.curPlayingList;
+        if (!['playOrder', 'playCycle', 'playRandom'].includes(mode) || !list || list.length < 2) return [];
+        const playing = resourceId(state);
+        const current = list.find(entry => String(entry.resourceId) === playing);
+        const order = mode === 'playRandom' ? 'randomOrder' : 'displayOrder';
+        if (!current || !Number.isFinite(current[order])) return [];
+        const ordered = list.filter(entry => entry !== current && Number.isFinite(entry[order]))
+            .sort((a, b) => a[order] - b[order]);
+        const after = ordered.filter(entry => entry[order] > current[order]);
+        if (mode !== 'playOrder') after.push(...ordered.filter(entry => entry[order] <= current[order]));
+        return after.slice(0, 3);
+    }
+    function prepareTransition(task, howl, url, info) {
+        if (!store || !window.__musicPrepareTransition) return;
+        const state = store.getState();
+        const mode = state.playing.playingMode;
+        const playing = resourceId(state), quality = preference(state);
+        const song = String(info.songId);
+        const isNext = snapshot => {
+            const [item] = upcomingTracks(snapshot);
+            return item && [item.trackId, item.track?.id, item.resourceId].some(id => String(id) === song);
+        };
+        if (state.playing.resourceIsTryType || !isNext(state)) return;
+        task.reply = sourceReplies.get(url);
+        window.__musicPrepareTransition(howl, url, Number(info.songDuration) / 1000, () => {
+            const current = store.getState();
+            if (preload !== task || currentHowl() !== howl || pending || resourceId(current) !== playing ||
+                current.playing.playingMode !== mode || preference(current) !== quality || !isNext(current))
+                return false;
+            task.armed = true;
+            return true;
+        });
+    }
+
+    async function prefetchFurther(task, howl, firstSong) {
+        if (!store || !playerUrl || lookahead) return;
+        const connection = window.navigator?.connection;
+        if (window.navigator?.onLine === false || connection?.saveData ||
+            ['slow-2g', '2g', '3g'].includes(connection?.effectiveType)) return;
+        const state = store.getState(), quality = preference(state), resource = resourceId(state);
+        const getIds = snapshot => upcomingTracks(snapshot).slice(1)
+            .filter(item => !item.resourceType || item.resourceType === 'track')
+            .map(item => Number(item.trackId || item.track?.id || item.resourceId))
+            .filter(id => Number.isSafeInteger(id) && id > 0 && id !== Number(firstSong));
+        const ids = [...new Set(getIds(state))];
+        if (!ids.length || !quality) return;
+        const work = lookahead = {controller: new AbortController(), key: null};
+        const valid = () => {
+            const current = store.getState();
+            return lookahead === work && preload === task && currentHowl() === howl &&
+                howl.playing() && !howl._buffering && !pending && resourceId(current) === resource &&
+                preference(current) === quality && ids.join(',') === [...new Set(getIds(current))].join(',');
+        };
+        const signal = work.controller.signal;
+        try {
+            if (!valid()) return;
+            const response = await playerUrl({ids: ids.map(String), level: quality.level, encodeType: 'mp3',
+                immerseType: 'ste', trialMode: -1}, {signal});
+            for (const id of ids) {
+                if (!valid()) break;
+                const audio = response?.data?.find(item => Number(item.id) === id);
+                if (audio?.code !== 200 || !audio.url || audio.freeTrialInfo || audio.type === 'av3a') continue;
+                const url = sourceKey(audio.url);
+                work.key = fingerprints.get(url) || url;
+                const copy = await window.__musicFetchNativeAudio(url, signal, null, true);
+                copy.release();
+                if (!copy.persisted) break;
+            }
+        } catch (_) {
+            // A slow link or foreground download ends this prefetch round.
+        } finally {
+            if (lookahead === work) lookahead = null;
+        }
+    }
+
     function preloadNext(info) {
         const howl = currentHowl(), url = sourceKey(info.musicurl);
         if (!howl || howl._state !== 'loaded' || !howl.playing() || pending ||
@@ -95,6 +193,10 @@
         }).catch(() => {
             if (preload === task) preload = null;
             return null;
+        });
+        if (!info.freeTrialInfo) prepareTransition(task, howl, url, info);
+        task.download.then(copy => {
+            if (copy?.persisted && preload === task) prefetchFurther(task, howl, info.songId);
         });
     }
     Object.defineProperty(window, '__musicTakePreload', {value: (url, signal, progress) => {
@@ -118,6 +220,8 @@
     }
     function patchExports(module, source, overrides) {
         const exports = module.exports;
+        if (isProgressModule(source) && exports.b?.getValue && exports.c?.getValue && exports.d?.next)
+            progressChannel = exports;
         if (source.includes('getCacheProgressPercent()') && exports.AudioPlayer &&
             typeof exports.AudioPlayer.preLoad === 'function') {
             const audio = exports.AudioPlayer, original = audio.preLoad;
@@ -152,17 +256,42 @@
                 const ids = input.flatMap(value => typeof value === 'string' ? [].concat(JSON.parse(value)) : [value]).map(String);
                 if (pending && pending.phase === 'switching' && pending.reply &&
                     ids.length === 1 && ids[0] === pending.track && params.level === pending.actual.level) return pending.reply;
+                const prefetched = preload?.armed && preload.reply;
+                if (prefetched && ids.length === 1 && ids[0] === prefetched.song &&
+                    params.level === prefetched.level && Date.now() < prefetched.expires) return prefetched.response;
                 const high = ['lossless', 'hires', 'jyeffect', 'jymaster', 'sky'].includes(params.level);
-                const response = await (nativeHandler ? requestNative(params, options && options.signal) :
-                    request({...params, encodeType: params.level === 'vivid' ? 'mp3' : high ? 'flac' : params.encodeType}, options));
+                const signal = options && options.signal;
+                let response;
+                if (nativeHandler) {
+                    try {
+                        response = await requestNative(params, signal);
+                    } catch (error) {
+                        if (signal && signal.aborted) throw error;
+                    }
+                }
+                if (response?.code !== 200 || !response.data?.some(item => item.url)) {
+                    response = await request({...params,
+                        encodeType: params.level === 'vivid' ? 'mp3' : high ? 'flac' : params.encodeType}, options);
+                }
                 for (const item of response && response.data || []) {
-                    if (item.url) fingerprints.set(sourceKey(item.url), fingerprint(item.url, item.md5, item.size));
+                    if (item.url) {
+                        const url = sourceKey(item.url);
+                        fingerprints.set(url, fingerprint(url, item.md5, item.size));
+                        sourceTypes.set(url, item.type);
+                        if (item.code === 200 && !item.freeTrialInfo && Number(item.expi) > 10) {
+                            sourceReplies.set(url, {song: String(item.id), level: params.level,
+                                expires: Date.now() + (Math.min(Number(item.expi), 600) - 5) * 1000,
+                                response: {...response, data: [item]}});
+                        }
+                    }
                     const choice = find(item.level);
                     if (!choice || !item.id) continue;
                     metadata.set(String(item.id) + ':' + choice.value, {bitrate: Number(item.br) || 0});
                 }
                 while (metadata.size > 24) metadata.delete(metadata.keys().next().value);
                 while (fingerprints.size > 24) fingerprints.delete(fingerprints.keys().next().value);
+                while (sourceTypes.size > 24) sourceTypes.delete(sourceTypes.keys().next().value);
+                while (sourceReplies.size > 16) sourceReplies.delete(sourceReplies.keys().next().value);
                 return response;
             };
         }
@@ -170,6 +299,7 @@
             if ((Object.getOwnPropertyDescriptor(exports, key) || {}).writable) exports[key] = overrides[key];
         }
     }
+    const isProgressModule = source => source.includes('inSeek:!1') && source.includes('.asObservable()');
     function inspect(chunk) {
         const factories = chunk && chunk[1];
         if (!factories) return;
@@ -179,7 +309,8 @@
             const source = factory.toString();
             if (!source.includes('this.app._store.dispatch') && !source.includes('serverUsedId:"jymaster"') &&
                 !source.includes('[[5999e3,"sky"]') && !source.includes('5999:"sky"') &&
-                !source.includes('/api/song/enhance/player/url/v1') && !source.includes('getCacheProgressPercent()')) continue;
+                !source.includes('/api/song/enhance/player/url/v1') && !source.includes('getCacheProgressPercent()') &&
+                !isProgressModule(source)) continue;
             const wrapped = function (module, exports, require) {
                 const overrides = {};
                 const adapted = new Proxy(require, {get: (target, key) => key === 'd' ?
@@ -246,6 +377,30 @@
             return '当前歌曲暂无该音质';
         return '';
     }
+    function prepareQuality(ticket, audio) {
+        const stream = window.__musicCanStreamSource?.(audio.url, audio.type);
+        const duration = Number(audio.time) / 1000;
+        let last = -1;
+        return new Promise((resolve, reject) => {
+            window.__musicFetchNativeAudio(audio.url, ticket.controller.signal, (bytes, total) => {
+                if (pending !== ticket || ticket.phase !== 'buffering' || total <= 0) return;
+                const percent = Math.min(99, Math.floor(bytes * 100 / total));
+                if (percent !== last) { last = percent; emit('正在加载' + ticket.actual.name + ' · ' + percent + '%'); }
+                if (!stream) return;
+                const position = currentPosition();
+                const seconds = duration > 0 ? duration : currentHowl()?.duration?.();
+                // Keep the old source playing until the new one can resume near its clock.
+                const required = seconds > 0 ? total * Math.min(1, (position + 3) / seconds) :
+                    position > 0 ? total : 0;
+                if (bytes >= Math.min(total, Math.max(64 * 1024, required))) resolve();
+            }).then(copy => {
+                if (pending === ticket) ticket.prepared = copy;
+                else copy.release();
+                resolve();
+            }, reject);
+        });
+    }
+
     async function choose(choice) {
         if (!store || pending || restriction(choice, store.getState())) return;
         const state = store.getState(), id = trackId(state);
@@ -294,28 +449,22 @@
                 clearPending(); emit(actual.value === choice.value ? '已使用' + actual.name : '当前歌曲使用' + actual.name);
                 return;
             }
-            ticket.actual = actual; ticket.reply = response;
+            Object.assign(ticket, {actual, reply: response, url: sourceKey(audio.url)});
             if (window.__musicFetchNativeAudio) {
                 discardPreload();
                 ticket.phase = 'buffering';
-                let last = -1;
-                const prepared = await window.__musicFetchNativeAudio(audio.url, ticket.controller.signal, (bytes, total) => {
-                    const percent = total ? Math.min(99, Math.floor(bytes * 100 / total)) : 0;
-                    if (pending === ticket && percent !== last) { last = percent; emit('正在加载' + actual.name + ' · ' + percent + '%'); }
-                });
-                if (pending !== ticket || trackId(store.getState()) !== id) { prepared.release(); return; }
-                ticket.prepared = prepared;
+                await prepareQuality(ticket, audio);
             }
+            if (pending !== ticket || trackId(store.getState()) !== id) return;
             const active = currentHowl();
-            const position = active && active._state === 'loaded' ? Number(active.seek()) : 0;
+            ticket.position = active?._state === 'loaded' ? currentPosition() : 0;
             ticket.paused = active ? !active.playing() : store.getState().playing.playingState !== 2;
             ticket.phase = 'switching';
-            ticket.actual = actual;
             ticket.awaiting = true;
             emit('正在切换至' + actual.name + '…');
             const result = store.dispatch({type: 'playing/switchQuality', payload: {quality: {
                 quality: actual.value, type: ['sky', 'vivid'].includes(actual.level) ? 'envSound' : 'soundQuality'},
-                current: Number.isFinite(position) ? position : 0, triggerScene: 'miniBar'}});
+                current: ticket.position, triggerScene: 'miniBar'}});
             if (result && typeof result.then === 'function') { await result; ticket.finished = true; }
             ticket.awaiting = false; sync();
         } catch (error) {
@@ -350,7 +499,7 @@
         const openAbove = above >= below;
         const fitsBeside = Math.max(above, below) >= 180;
         panel.style.width = width + 'px';
-        const left = anchor === settingControl ? rect.left : rect.right - width;
+        const left = rect.right - width;
         panel.style.left = Math.max(12, Math.min(left, innerWidth - width - 12)) + 'px';
         panel.style.maxHeight = (fitsBeside ? Math.max(above, below) : innerHeight - 24) + 'px';
         panel.style.top = fitsBeside ? (openAbove ? 'auto' : (rect.bottom + 12) + 'px') : '12px';
@@ -370,15 +519,24 @@
     function sync() {
         if (!store || !panel) return;
         const state = store.getState(), playing = state.playing, id = trackId(state);
-        if (lastTrack !== id) {
-            lastTrack = id;
+        const resource = resourceId(state);
+        const oldSeek = lastTrack && resource && lastTrack !== resource && playing.loadingSeekDuration;
+        if (lastTrack !== resource) {
+            lastTrack = resource;
             deferred = null;
+            loading = null;
             notice = '';
             if (!panel.hidden) fetchDetails();
         }
+        let interruptedQualitySwitch = false;
         if (pending && pending.track !== id) {
-            const switching = pending.phase === 'switching'; clearPending(); notice = '';
-            if (switching) store.dispatch({type: 'playing/onLoadingSeekUpdate', payload: {loadingSeekDuration: 0}});
+            interruptedQualitySwitch = pending.phase === 'switching';
+            clearPending(); notice = '';
+        }
+        if (oldSeek || interruptedQualitySwitch) {
+            const restore = playing.restoreResource;
+            const restoring = restore && (String(restore.id) === resource || id && String(restore.trackId) === id);
+            if (!restoring) store.dispatch({type: 'playing/onLoadingSeekUpdate', payload: {loadingSeekDuration: 0}});
         }
         if (pending && pending.phase === 'switching' && !pending.awaiting &&
             (pending.finished || Number(playing.resourcePlayingQuality) === pending.actual.value)) {
@@ -403,13 +561,17 @@
             if (button.textContent !== label) button.textContent = label;
             button.title = loading ? '正在加载音频' : actual && id ? '当前音质：' + actual.name : '选择播放音质';
         }
-        settingControl.textContent = preferred ? preferred.name : '选择音质';
+        if (settingStatus.textContent !== notice) settingStatus.textContent = notice;
         choices.forEach((choice, index) => {
             const row = rows.get(choice.value), reason = reasons[index];
             row.disabled = !!pending || !!blocked[index];
             row.title = reason || choice.description;
             row.setAttribute('aria-checked', String(preferred === choice));
             row.querySelector('.ncm-quality-description').textContent = reason || choice.description;
+            const radio = settingChoices.get(choice.value);
+            radio.checked = preferred === choice;
+            radio.disabled = row.disabled;
+            radio.parentNode.title = blocked[index];
         });
         const info = actual && metadata.get(id + ':' + actual.value);
         const current = id && actual ? '当前播放：' + actual.name +
@@ -443,6 +605,45 @@
         button.addEventListener('click', event => { event.stopPropagation(); open(button); });
         return button;
     }
+    function makeQualitySettings() {
+        const row = element('section', 'ncm-quality-setting-row');
+        const label = element('span', 'ncm-quality-setting-label', '默认音质');
+        label.id = 'ncm-default-quality-label';
+        const content = element('div', 'ncm-quality-setting-content');
+        const options = element('div', 'ncm-quality-setting-options');
+        options.setAttribute('role', 'radiogroup');
+        options.setAttribute('aria-labelledby', label.id);
+        for (const choice of [...choices].sort((a, b) => a.value - b.value)) {
+            const option = element('label', 'ncm-quality-setting-option');
+            const radio = element('input', 'ncm-quality-setting-radio');
+            radio.type = 'radio';
+            radio.name = 'ncm-default-quality';
+            radio.value = String(choice.value);
+            radio.addEventListener('change', () => { if (radio.checked) choose(choice); });
+            settingChoices.set(choice.value, radio);
+            option.appendChild(radio);
+            option.appendChild(element('span', '', choice.name));
+            options.appendChild(option);
+        }
+        settingStatus = element('div', 'ncm-quality-setting-status');
+        settingStatus.setAttribute('role', 'status');
+        content.appendChild(options);
+        content.appendChild(settingStatus);
+        row.appendChild(label);
+        row.appendChild(content);
+        return row;
+    }
+    function publishClock({detail: {howl, position, cacheProgress}}) {
+        if (!progressChannel || howl !== currentHowl() || progressChannel.c.getValue()?.inSeek) return;
+        const state = store.getState(), id = trackId(state);
+        if (!id || streamOwners.get(howl) !== resourceId(state)) return;
+        // The site's seek gate can outlive the stream that opened it.
+        // This tick comes from the playing stream and has no pending seek.
+        if (progressChannel.b.getValue()) progressChannel.b.next(false);
+        const playId = String(state.playing.playId || '');
+        progressChannel.d.next({playId: playId.split('_')[0] === id ? playId : id,
+            current: position, cacheProgress, force: false});
+    }
     function mount() {
         if (!tool || !tool.app || !tool.app._store || !playerUrl || !document.body) return false;
         store = tool.app._store;
@@ -450,10 +651,7 @@
         const style = element('style', ''); style.textContent = STYLE; document.head.appendChild(style);
         control = makeControl('mini', '选择播放音质');
         detailControl = makeControl('detail', '歌曲详情页播放音质');
-        settingControl = makeControl('setting', '默认音质');
-        settingRow = element('section', 'ncm-quality-setting-row');
-        settingRow.appendChild(element('span', '', '默认音质'));
-        settingRow.appendChild(settingControl);
+        settingRow = makeQualitySettings();
         document.body.appendChild(control);
         document.body.appendChild(detailControl);
         panel = element('div', 'ncm-quality-panel'); panel.hidden = true;
@@ -491,6 +689,10 @@
         }, true);
         window.addEventListener('resize', place);
         window.addEventListener('scroll', position, true);
+        window.addEventListener('music-audio-stream-open', ({detail: howl}) => {
+            streamOwners.set(howl, resourceId(store.getState()));
+        });
+        window.addEventListener('music-audio-clock', publishClock);
         window.addEventListener('music-audio-progress', ({detail}) => {
             if (detail.loading) {
                 const percent = detail.total ? Math.min(99, Math.floor(detail.bytes * 100 / detail.total)) : null;
@@ -524,10 +726,14 @@
 .ncm-quality-button[hidden]{display:none}
 .ncm-quality-mini,.ncm-quality-detail{position:static;flex:none}
 .ncm-quality-detail{opacity:1}
-.ncm-quality-setting-row{display:flex;align-items:center;flex-wrap:wrap;font-size:var(--music-setting-font-size,14px);line-height:20px}
-.ncm-quality-setting-row > span{min-width:var(--music-setting-label-width,7em);margin-right:8px}
-.ncm-quality-setting{position:static;box-sizing:border-box;min-height:var(--music-setting-control-height,28px);font-size:inherit;line-height:20px;border-color:#8886;border-radius:6px;padding:2px 8px;opacity:1}
-.ncm-quality-setting::after{content:"";display:inline-block;width:5px;height:5px;margin:0 2px 3px 8px;border-right:1px solid;border-bottom:1px solid;transform:rotate(45deg)}
+.ncm-quality-setting-row{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 8px;font-size:var(--music-setting-font-size,14px);line-height:20px}
+.ncm-quality-setting-label{flex:0 0 var(--music-setting-label-width,7em)}
+.ncm-quality-setting-content{flex:1 1 16em;min-width:0}
+.ncm-quality-setting-options{display:flex;flex-wrap:wrap;gap:4px 20px}
+.ncm-quality-setting-option{display:inline-flex;align-items:center;gap:8px;min-height:24px;white-space:nowrap;cursor:pointer}
+.ncm-quality-setting-radio{appearance:auto;flex:none;width:16px;height:16px;margin:0;accent-color:#ff3348}
+.ncm-quality-setting-radio:disabled + span{opacity:.55;cursor:default}
+.ncm-quality-setting-status:not(:empty){margin-top:4px;font-size:.9em}
 .ncm-quality-button:hover,.ncm-quality-button[aria-expanded=true]{color:#ba8c45;opacity:1}
 .ncm-quality-detail:hover,.ncm-quality-detail[aria-expanded=true]{color:var(--q-control-fg,inherit);background:#8882}
 .ncm-quality-panel{--q-bg:#fff;--q-fg:#292a30;--q-muted:#909098;--q-hover:#f7f5f1;position:fixed;z-index:2147483000;display:flex;flex-direction:column;box-sizing:border-box;max-height:calc(100vh - 24px);color:var(--q-fg);background:var(--q-bg);border:1px solid rgba(128,128,128,.14);border-radius:14px;box-shadow:0 8px 36px #0003;font-family:inherit;font-size:13px;overflow:hidden;text-align:left}

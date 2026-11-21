@@ -1,0 +1,75 @@
+(() => {
+    'use strict';
+    if (location.origin !== 'https://music.163.com' || location.pathname.replace(/\/$/, '') !== '/st/webplayer') return;
+    const handler = window.webkit.messageHandlers.transitionSettings;
+    const row = document.createElement('div');
+    const root = row.attachShadow({mode: 'closed'});
+    root.innerHTML = `
+        <style>
+            :host{display:block;color:inherit;font-size:var(--music-setting-font-size,14px);line-height:20px}
+            .row{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 8px}
+            .row>span{flex:0 0 var(--music-setting-label-width,7em)}
+            .controls,.options,.duration{display:flex;align-items:center;flex-wrap:wrap}
+            .controls{flex:1 1 16em;min-width:0;gap:6px 20px}
+            .options{gap:4px 20px}
+            .options label{display:inline-flex;align-items:center;gap:8px;min-height:24px;white-space:nowrap;cursor:pointer}
+            input[type="radio"]{flex:none;width:16px;height:16px;margin:0;accent-color:#ff3348}
+            .duration{gap:4px 8px}
+            input[type="number"]{box-sizing:border-box;width:4.5em;min-height:var(--music-setting-control-height,28px);font:inherit;color:inherit;background:transparent;border:1px solid #8886;border-radius:6px;padding:2px 8px}
+            [hidden]{display:none}
+            .error:not(:empty){display:block;margin-top:6px}
+        </style>
+        <div class="row">
+            <span id="transition-label">歌曲过渡</span>
+            <div class="controls">
+                <div class="options" role="radiogroup" aria-labelledby="transition-label">
+                    <label><input type="radio" name="mode" value="off" disabled>关闭</label>
+                    <label><input type="radio" name="mode" value="fade" disabled>淡入淡出</label>
+                    <label><input type="radio" name="mode" value="mix" disabled>混音过渡</label>
+                </div>
+                <div class="duration" hidden>
+                    <label for="seconds">过渡时长</label>
+                    <input id="seconds" type="number" min="1" max="12" step="1" value="3">
+                    <span>秒</span>
+                </div>
+            </div>
+        </div>
+        <span class="error" role="status"></span>`;
+    const modes = [...root.querySelectorAll('input[name="mode"]')];
+    const seconds = root.querySelector('#seconds');
+    const duration = root.querySelector('.duration');
+    const status = root.querySelector('.error');
+    let savedSeconds = 3;
+    window.updateMusicTransition = (settings, error) => {
+        for (const radio of modes) {
+            radio.checked = radio.value === settings.mode;
+            radio.disabled = false;
+        }
+        seconds.value = savedSeconds = settings.seconds;
+        duration.hidden = settings.mode === 'off';
+        status.textContent = error;
+    };
+    function save(event) {
+        if (!event.isTrusted) return;
+        const mode = modes.find(radio => radio.checked);
+        if (!mode) return;
+        if (!seconds.value || !seconds.validity.valid) {
+            seconds.value = savedSeconds;
+            status.textContent = '时长可设为 1 至 12 秒。';
+            return;
+        }
+        handler.postMessage(JSON.stringify({mode: mode.value, seconds: Number(seconds.value)}));
+    }
+    for (const radio of modes) radio.addEventListener('change', save);
+    seconds.addEventListener('change', save);
+    function mount() {
+        const playback = document.querySelector('#page_pc_setting #play > .play');
+        if (playback && row.parentNode !== playback) {
+            const quality = playback.querySelector('.ncm-quality-setting-row');
+            playback.insertBefore(row, quality ? quality.nextSibling : playback.firstChild);
+            handler.postMessage('"read"');
+        }
+    }
+    new MutationObserver(mount).observe(document.body, {childList: true, subtree: true});
+    mount();
+})();

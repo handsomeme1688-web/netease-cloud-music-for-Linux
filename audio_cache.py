@@ -1,4 +1,4 @@
-"""Private audio transport with a bounded cache of complete tracks."""
+"""Private audio transport and a persistent cache of complete tracks."""
 import hashlib
 from bisect import bisect_right
 import os
@@ -11,14 +11,13 @@ import threading
 import time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from audio_buffer import AudioBuffer, MAX_BYTES, audio_uri
+from gi.repository import Gio
+from audio_buffer import AudioBuffer, MAX_DOWNLOAD_BYTES, audio_uri
 
 
-DISK_LIMIT = 1024 * 1024 * 1024
-DISK_TRACKS = 64
+MAX_MEMORY_BYTES = 192 * 1024 * 1024
 MIME_TYPES = {'mp3': 'audio/mpeg', 'flac': 'audio/flac', 'aac': 'audio/aac',
               'm4a': 'audio/mp4', 'ogg': 'audio/ogg', 'wav': 'audio/wav'}
-TRACK_FILE = re.compile(r'[0-9a-f]{32}-[0-9]+\.(?:' + '|'.join(MIME_TYPES) + r')')
 
 
 def byte_range(value, size):
@@ -81,7 +80,7 @@ class AudioCache:
                 identifier = self.path[len(cache.prefix):]
                 with cache.lock:
                     entry = cache.entries.get(identifier)
-                    if entry and ('data' in entry or 'path' in entry):
+                    if entry and entry['complete']:
                         size = entry['size']
                     elif entry and identifier in cache.streams:
                         size = entry['expected']
@@ -146,7 +145,7 @@ class AudioCache:
             digest, size, kind = (track.get(name) for name in ('md5', 'size', 'type'))
             if (uri and track.get('code') == 200 and not track.get('freeTrialInfo') and
                     isinstance(digest, str) and re.fullmatch(r'[a-fA-F0-9]{32}', digest) and
-                    type(size) is int and 0 < size <= MAX_BYTES and isinstance(kind, str) and kind in MIME_TYPES):
+                    type(size) is int and 0 < size <= MAX_DOWNLOAD_BYTES and isinstance(kind, str) and kind in MIME_TYPES):
                 self.sources[uri] = (digest.lower(), size, kind)
         while len(self.sources) > 64:
             del self.sources[next(iter(self.sources))]
@@ -159,54 +158,31 @@ class AudioCache:
         try:
             if path.is_symlink() or not path.is_file() or path.stat().st_size != key[1]:
                 return None
-            os.utime(path, None)
         except OSError:
             return None
         return path
 
-    def store_track(self, key, chunks, size):
-        if not self.directory or not key or key[1] != size:
-            return None
-        temporary = None
+    @staticmethod
+    def unlink_partial(file):
         try:
-            digest = hashlib.md5()
-            with tempfile.NamedTemporaryFile(dir=self.directory, prefix='.track-', delete=False) as file:
-                temporary = Path(file.name)
-                for chunk in chunks:
-                    digest.update(chunk)
-                    file.write(chunk)
-            if digest.hexdigest() != key[0]:
-                return None
-            path = self.archive_path(key)
-            temporary.replace(path)
-            return path
+            Path(file.name).unlink(missing_ok=True)
         except OSError:
-            return None
-        finally:
-            if temporary:
-                try:
-                    temporary.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            pass
 
-    def prune_tracks(self):
-        try:
-            tracks = [(file, file.stat()) for file in self.directory.iterdir()
-                      if TRACK_FILE.fullmatch(file.name) and file.is_file()]
-        except OSError:
-            return
-        pinned = {entry.get('path') for entry in self.entries.values()}
-        total, count = sum(info.st_size for _, info in tracks), len(tracks)
-        for file, info in sorted(tracks, key=lambda item: item[1].st_mtime_ns):
-            if total <= DISK_LIMIT and count <= DISK_TRACKS:
-                break
-            if file not in pinned:
-                try:
-                    file.unlink(missing_ok=True)
-                except OSError:
-                    continue
-                total -= info.st_size
-                count -= 1
+    def make_partial(self):
+        if self.directory:
+            try:
+                return tempfile.NamedTemporaryFile(dir=self.directory, prefix='.track-', buffering=0, delete=False)
+            except OSError:
+                pass
+
+    def reserve_memory(self, entry, size):
+        unique = {id(item): item for item in self.entries.values()}.values()
+        used = sum(item['reserved'] for item in unique if item is not entry)
+        if used + size > MAX_MEMORY_BYTES:
+            return False
+        entry['reserved'] = size
+        return True
 
     def local_url(self, identifier):
         return 'https://127.0.0.1:%d%s%s' % (self.server.server_port, self.prefix, identifier)
@@ -218,8 +194,11 @@ class AudioCache:
                                       timeout=32)
                 if self.entries.get(identifier) is not entry or entry['size'] <= offset:
                     return
-                path, data = entry.get('path'), entry.get('data')
-                if path is None and data is None:
+                path, partial = entry.get('path'), entry.get('partial')
+                if partial:
+                    length = min(256 * 1024, end - offset + 1, entry['size'] - offset)
+                    part = os.pread(partial.fileno(), length, offset)
+                elif not path:
                     index = bisect_right(entry['offsets'], offset)
                     chunk_start = entry['offsets'][index - 1] if index else 0
                     chunk = entry['chunks'][index]
@@ -236,8 +215,7 @@ class AudioCache:
                         output.write(chunk)
                         offset += len(chunk)
                 return
-            if data is not None:
-                output.write(memoryview(data)[offset:end + 1])
+            if not part:
                 return
             output.write(part)
             offset += len(part)
@@ -254,9 +232,9 @@ class AudioCache:
 
     def deliver_complete(self, identifier, entry):
         self.notify(identifier, 'complete', {'bytes': entry['size'], 'mime': entry['mime'],
-            'url': self.local_url(identifier)})
+            'url': self.local_url(identifier), 'persisted': 'path' in entry})
 
-    def request(self, identifier, uri, stream=None):
+    def request(self, identifier, uri, stream=None, *, background=False):
         if (not isinstance(identifier, str) or not 0 < len(identifier) <= 64 or
                 not identifier.isascii() or not all(c.isalnum() or c in '-_' for c in identifier)):
             return
@@ -274,43 +252,78 @@ class AudioCache:
                 self.notify(identifier, 'failed', {})
                 self.streams.pop(identifier, None)
                 return
-            unique = {id(entry): entry for entry in self.entries.values()}.values()
             key = self.sources.get(uri)
+            if not background:
+                for entry in list(self.downloads.values()):
+                    if not entry['background']:
+                        continue
+                    if entry['uri'] == uri or key and entry['key'] == key:
+                        entry['background'] = False
+                        self.client.promote(entry['job'])
+                    else:
+                        self.fail(self.references(entry))
+            unique = {id(entry): entry for entry in self.entries.values()}.values()
             shared = next((entry for entry in unique if entry['uri'] == uri or key and entry.get('key') == key), None)
             if shared is None and key:
                 path = self.cached_track(key)
                 if path:
                     shared = {'uri': uri, 'key': key, 'path': path, 'size': key[1], 'expected': key[1],
-                              'reserved': 0, 'mime': MIME_TYPES[key[2]]}
+                              'complete': True, 'reserved': 0, 'mime': MIME_TYPES[key[2]]}
             if shared is not None:
                 self.entries[identifier] = shared
                 self.notify(identifier, 'head', {'bytes': shared['expected']})
                 self.announce(identifier, shared)
-                if 'data' in shared or 'path' in shared:
+                if shared['complete']:
                     self.deliver_complete(identifier, shared)
+                elif shared['size']:
+                    self.notify(identifier, 'progress', {'bytes': shared['size']})
                 return
-            if sum('path' not in entry for entry in unique) >= 2:
+            if (sum('path' not in entry for entry in unique) >= 2 or background and
+                    (not self.directory or not key or self.downloads or
+                     Gio.NetworkMonitor.get_default().get_network_metered())):
                 self.notify(identifier, 'failed', {})
                 self.streams.pop(identifier, None)
                 return
-            entry = {'uri': uri, 'key': key, 'job': identifier, 'chunks': [], 'offsets': [],
-                     'size': 0, 'expected': 0, 'reserved': 0, 'mime': 'application/octet-stream'}
+            partial = self.make_partial()
+            if background and not partial:
+                self.notify(identifier, 'failed', {})
+                self.streams.pop(identifier, None)
+                return
+            entry = {'uri': uri, 'key': key, 'job': identifier, 'chunks': [], 'offsets': [], 'background': background,
+                     'size': 0, 'expected': 0, 'reserved': 0, 'mime': 'application/octet-stream', 'complete': False,
+                     'partial': partial, 'digest': hashlib.md5() if partial and key else None}
             self.entries[identifier] = self.downloads[identifier] = entry
-        self.client.request(identifier, uri)
+        if background:
+            self.client.request(identifier, uri, background=True)
+        else:
+            self.client.request(identifier, uri)
+
+    def references(self, entry):
+        return [identifier for identifier, other in self.entries.items() if other is entry]
 
     def cancel(self, identifier):
         with self.updated:
             entry = self.entries.pop(identifier, None)
             self.streams.pop(identifier, None)
-            if entry and entry.get('job') in self.downloads and all(other is not entry for other in self.entries.values()):
-                job = entry['job']
-                del self.downloads[job]
-                self.client.cancel(job)
+            if entry and all(other is not entry for other in self.entries.values()):
+                job = entry.get('job')
+                if self.downloads.get(job) is entry:
+                    del self.downloads[job]
+                    self.client.cancel(job)
+                self.close_partial(entry)
             self.updated.notify_all()
+
+    def close_partial(self, entry):
+        file = entry.pop('partial', None)
+        if file:
+            file.close()
+            self.unlink_partial(file)
 
     def cancel_all(self):
         self.client.cancel_all()
         with self.updated:
+            for entry in self.entries.values():
+                self.close_partial(entry)
             self.entries.clear()
             self.downloads.clear()
             self.streams.clear()
@@ -329,31 +342,41 @@ class AudioCache:
             entry = self.downloads.get(identifier)
             if entry is None:
                 return
-            refs = [ref for ref, other in self.entries.items() if other is entry]
+            refs = self.references(entry)
             if event == 'head':
                 key = entry['key']
                 requested = value['bytes'] or (key[1] if key else 0)
-                unique = {id(item): item for item in self.entries.values()}.values()
-                used = sum(item['reserved'] for item in unique if item is not entry)
-                if requested < 0 or requested + used > MAX_BYTES:
+                if not 0 <= requested <= MAX_DOWNLOAD_BYTES or (
+                        not entry['partial'] and not self.reserve_memory(entry, requested)):
                     self.fail(refs)
                     return
                 entry['expected'] = requested
                 entry['mime'] = value.get('mime') or (MIME_TYPES[key[2]] if key else 'application/octet-stream')
-                entry['reserved'] = requested
                 for ref in refs:
                     self.notify(ref, 'head', {'bytes': requested})
                     self.announce(ref, entry)
             elif event == 'chunk':
                 data = value['data']
-                entry['size'] += len(data)
-                entry['reserved'] = max(entry['reserved'], entry['size'])
-                unique = {id(item): item for item in self.entries.values()}.values()
-                if sum(item['reserved'] for item in unique) > MAX_BYTES:
+                size = entry['size'] + len(data)
+                if size > (entry['expected'] or MAX_DOWNLOAD_BYTES):
                     self.fail(refs)
                     return
-                entry['chunks'].append(data)
-                entry['offsets'].append(entry['size'])
+                if entry['partial']:
+                    try:
+                        if entry['partial'].write(data) != len(data):
+                            raise OSError('Incomplete cache write')
+                    except OSError:
+                        self.fail(refs)
+                        return
+                    if entry['digest']:
+                        entry['digest'].update(data)
+                else:
+                    if not self.reserve_memory(entry, max(entry['reserved'], size)):
+                        self.fail(refs)
+                        return
+                    entry['chunks'].append(data)
+                    entry['offsets'].append(size)
+                entry['size'] = size
                 self.updated.notify_all()
                 now = time.monotonic()
                 if now - entry.get('reported_at', 0) >= .25:
@@ -365,25 +388,35 @@ class AudioCache:
                     self.fail(refs)
                     return
                 self.downloads.pop(identifier, None)
-                chunks = entry.pop('chunks')
-                entry.pop('offsets')
-                path = self.store_track(entry['key'], chunks, entry['size'])
-                if path:
-                    entry['path'], entry['reserved'] = path, 0
-                    self.prune_tracks()
-                else:
-                    entry['data'] = b''.join(chunks)
-                entry['mime'] = value['mime']
-                for ref in refs:
-                    if not entry['expected']:
-                        self.announce(ref, dict(entry, expected=entry['size']))
-                    self.deliver_complete(ref, entry)
-                self.updated.notify_all()
+                self.finish(entry, refs, value['mime'])
             else:
                 self.fail(refs)
                 return
         if continuation:
             continuation()
+
+    def finish(self, entry, refs, mime):
+        partial = entry['partial']
+        key = entry['key']
+        digest = entry.pop('digest')
+        if digest and entry['size'] == key[1] and digest.hexdigest() == key[0]:
+            temporary = Path(partial.name)
+            try:
+                entry['path'] = temporary.replace(temporary.with_name('%s-%d.%s' % key))
+            except OSError:
+                pass
+            else:
+                self.close_partial(entry)
+        if 'path' not in entry and partial:
+            # Preserve read access through the open descriptor until playback releases it.
+            self.unlink_partial(partial)
+        announce = not entry['expected']
+        entry.update(mime=mime, complete=True, expected=entry['size'])
+        for ref in refs:
+            if announce:
+                self.announce(ref, entry)
+            self.deliver_complete(ref, entry)
+        self.updated.notify_all()
 
     def fail(self, refs):
         for ref in refs:

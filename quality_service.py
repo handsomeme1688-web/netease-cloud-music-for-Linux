@@ -8,7 +8,7 @@ import time
 from urllib.parse import quote, urlencode
 
 from gi.repository import Gio, GLib
-from audio_buffer import MAX_BYTES, audio_uri
+from audio_buffer import MAX_DOWNLOAD_BYTES, audio_uri
 
 LEVELS = {'standard', 'higher', 'exhigh', 'lossless', 'hires', 'jyeffect', 'jymaster', 'sky', 'vivid'}
 PATH = '/api/song/enhance/player/url/v1'
@@ -163,7 +163,7 @@ class QualityService:
                 safe = {key: value for key, value in item.items() if key in FIELDS}
                 safe['url'] = audio_uri(item.get('url'))
                 items.append(safe)
-            output = {'code': response.get('code', 0), 'data': items, 'cacheLimit': MAX_BYTES}
+            output = {'code': response.get('code', 0), 'data': items, 'cacheLimit': MAX_DOWNLOAD_BYTES}
         except (ValueError, TypeError, AttributeError):
             self.fail(job)
             return
