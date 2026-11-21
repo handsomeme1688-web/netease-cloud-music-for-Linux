@@ -61,7 +61,7 @@
     const fields = {standard: 'l', higher: 'm', exhigh: 'h', lossless: 'sq', hires: 'hr',
         jyeffect: 'je', jymaster: 'jm', sky: 'sk', vivid: 'vi'};
     let tool, store, playerUrl, musicDetail, songQualities, pending, deferred, panel, list, footer, anchor, loading;
-    let progressChannel;
+    let progressChannel, lyricProgress;
     const streamOwners = new WeakMap();
     let control, detailControl, settingRow, settingStatus;
     const settingChoices = new Map();
@@ -73,6 +73,20 @@
         const position = Number(currentHowl()?.seek());
         return Number.isFinite(position) ? Math.max(0, position) : 0;
     };
+    Object.defineProperty(window, '__musicLyricPlayback', {value: () => {
+        if (!store) return null;
+        const state = store.getState(), playing = state.playing;
+        const id = trackId(state) || String(playing.curPlaying?.track?.id || '');
+        const howl = window.__musicStreamingActive?.();
+        const owner = howl && streamOwners.get(howl) === resourceId(state);
+        const progressId = String(lyricProgress?.playId || '');
+        const matches = id && progressId && (progressId === String(playing.playId) ||
+            progressId.split(/[_|]/, 1)[0] === id);
+        const position = owner && howl._state === 'loaded' ? currentPosition() :
+            matches ? lyricProgress.current : undefined;
+        return {id, title: id ? (playing.curPlaying?.track?.name || playing.resourceTrackName || '') : '',
+            stream: owner ? window.__musicStreamingId?.() : '', position, advancing: playing.playingState === 2};
+    }});
     Object.defineProperty(window, '__musicStreamType', {value: url => sourceTypes.get(sourceKey(url))});
     Object.defineProperty(window, '__musicStreamStartPosition', {value: url =>
         pending?.phase === 'switching' && pending.url === sourceKey(url) &&
@@ -220,8 +234,12 @@
     }
     function patchExports(module, source, overrides) {
         const exports = module.exports;
-        if (isProgressModule(source) && exports.b?.getValue && exports.c?.getValue && exports.d?.next)
+        if (isProgressModule(source) && exports !== progressChannel &&
+            exports.b?.getValue && exports.c?.getValue && exports.d?.next) {
             progressChannel = exports;
+            lyricProgress = undefined;
+            exports.d.subscribe?.(frame => { if (progressChannel === exports) lyricProgress = frame; });
+        }
         if (source.includes('getCacheProgressPercent()') && exports.AudioPlayer &&
             typeof exports.AudioPlayer.preLoad === 'function') {
             const audio = exports.AudioPlayer, original = audio.preLoad;
@@ -518,6 +536,7 @@
     }
     function sync() {
         if (!store || !panel) return;
+        window.__musicDesktopLyrics?.refresh();
         const state = store.getState(), playing = state.playing, id = trackId(state);
         const resource = resourceId(state);
         const oldSeek = lastTrack && resource && lastTrack !== resource && playing.loadingSeekDuration;
@@ -691,6 +710,7 @@
         window.addEventListener('scroll', position, true);
         window.addEventListener('music-audio-stream-open', ({detail: howl}) => {
             streamOwners.set(howl, resourceId(store.getState()));
+            window.__musicDesktopLyrics?.refresh();
         });
         window.addEventListener('music-audio-clock', publishClock);
         window.addEventListener('music-audio-progress', ({detail}) => {

@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 PLAYBACK_LOG_LIMIT = 2 * 1024 * 1024
@@ -38,6 +38,9 @@ section[class*="RightContainer_"] { flex: 1 1 0 !important; min-width: 0 !import
 #page_pc_main_nav {
     box-sizing: border-box !important;
     padding-right: var(--music-window-controls-width) !important;
+}
+#page_pc_main_nav [class*="HeaderRow_"] > [class*="HistoryIconBackground_"] {
+    margin-right: 8px !important;
 }
 #page_pc_main_nav [class*="MiniModeIconBar_"] > :not(:empty):not([hidden]):not([style*="display: none"]) {
     display: flex !important;
@@ -69,7 +72,7 @@ section[class*="RightContainer_"] { flex: 1 1 0 !important; min-width: 0 !import
     #page_pc_main_nav { padding-left: clamp(12px, 2vw, 40px) !important; }
     #page_pc_main_nav [class*="HeaderRow_"] { display: flex !important; align-items: center; min-width: 0; }
     #page_pc_main_nav [class*="HeaderRow_"] > :empty { display: none !important; }
-    #page_pc_main_nav [class*="HistoryIconBackground_"] { flex: none; margin-right: 8px; }
+    #page_pc_main_nav [class*="HistoryIconBackground_"] { flex: none; }
     #page_pc_main_nav [class*="SearchWrapper_"] { flex: 0 1 258px; min-width: 48px; }
     #page_pc_main_nav .searchbox { width: 100% !important; min-width: 0 !important; }
     #page_pc_main_nav .searchbox input { min-width: 0 !important; }
@@ -634,6 +637,7 @@ class MusicWindow(Gtk.ApplicationWindow):
         super().__init__(application=app, title=APP_NAME)
         self.app = app
         self.is_popup = related_view is not None
+        self.desktop_lyrics = None
         self.set_role(APP_ID)
         self.set_wmclass(APP_ID, APP_ID)
         display = self.get_display()
@@ -763,6 +767,15 @@ class MusicWindow(Gtk.ApplicationWindow):
                 script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
                 WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/st/webplayer*"], None))
             if not self.is_popup:
+                manager.register_script_message_handler_in_world("desktopLyricsSettings", CACHE_SETTINGS_WORLD)
+                manager.connect("script-message-received::desktopLyricsSettings", self.desktop_lyrics_settings_message)
+                manager.register_script_message_handler("desktopLyrics")
+                manager.connect("script-message-received::desktopLyrics", self.desktop_lyrics_message)
+                lyric_script = Path(__file__).resolve().parent / "assets" / "desktop-lyrics.js"
+                manager.add_script(WebKit2.UserScript.new(
+                    lyric_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                    WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/st/webplayer*"], None))
+                self.connect("destroy", self.destroy_desktop_lyrics)
                 manager.register_script_message_handler("systemMedia")
                 manager.connect("script-message-received::systemMedia", self.system_media_message)
                 media_script = Path(__file__).resolve().parent / "assets" / "system-media.js"
@@ -1147,6 +1160,8 @@ class MusicWindow(Gtk.ApplicationWindow):
         shift = event.state & Gdk.ModifierType.SHIFT_MASK
         if ctrl and shift and key.lower() == "r":
             self.app.recover_player()
+        elif ctrl and not (shift or alt or self.is_popup) and key.lower() == "d":
+            self.show_desktop_lyrics(not self.desktop_lyrics_visible())
         elif key == "F5" or (ctrl and key.lower() == "r"):
             self.webview.reload()
         elif alt and key == "Home":
@@ -1180,12 +1195,17 @@ class MusicWindow(Gtk.ApplicationWindow):
                 self.audio_buffer.cancel_all()
             if not self.is_popup:
                 self.get_application().system_media.reset()
+                self.sync_lyrics_playback()
+            if self.desktop_lyrics:
+                self.desktop_lyrics.set_track("", "", "")
             self.playback_notice.hide()
             self.stack.set_visible_child_name("web")
             self.progress.show()
         elif event == WebKit2.LoadEvent.FINISHED:
             self.progress.hide()
             self.position_window_controls()
+            if self.desktop_lyrics_visible():
+                self.sync_desktop_lyrics()
 
     def progress_changed(self, view, _spec):
         self.progress.set_fraction(view.get_estimated_load_progress())
@@ -1215,6 +1235,9 @@ class MusicWindow(Gtk.ApplicationWindow):
     def process_terminated(self, *_):
         if not self.is_popup:
             self.get_application().system_media.reset()
+            self.sync_lyrics_playback()
+        if self.desktop_lyrics:
+            self.desktop_lyrics.set_track("", "", "")
         self.show_error("网页进程已停止。点击“重新加载”继续。")
 
     def system_media_message(self, _manager, result):
@@ -1228,6 +1251,7 @@ class MusicWindow(Gtk.ApplicationWindow):
         except (ValueError, TypeError):
             return
         self.get_application().system_media.update(message)
+        self.sync_lyrics_playback()
 
     def native_audio_message(self, _manager, result):
         if not self.get_window() or not is_player_uri(self.webview.get_uri()):
@@ -1353,9 +1377,99 @@ class MusicWindow(Gtk.ApplicationWindow):
 
     def deliver_stream(self, identifier, event, state):
         if self.get_window() and is_player_uri(self.webview.get_uri()):
+            if self.desktop_lyrics_visible() and self.desktop_lyrics.stream == identifier:
+                lyrics = self.desktop_lyrics
+                position = state.get("position", lyrics.position / 1000)
+                advancing = state.get("playing", False) and not state.get("buffering", False)
+                rate = self.stream_player.track["rate"] if self.stream_player.track else 1.0
+                lyrics.clock(position, advancing, rate)
             script = "window.__musicStreamEvent && window.__musicStreamEvent(%s,%s,%s)" % (
                 json.dumps(identifier), json.dumps(event), json.dumps(state))
             self.webview.run_javascript(script, None, None, None)
+
+    def desktop_lyrics_visible(self):
+        return bool(self.desktop_lyrics and self.desktop_lyrics.get_visible())
+
+    def show_desktop_lyrics(self, visible):
+        if visible:
+            if self.desktop_lyrics is None:
+                from desktop_lyrics import DesktopLyrics
+                self.desktop_lyrics = DesktopLyrics(
+                    self.get_display(), lambda: self.show_desktop_lyrics(False),
+                    self.app.config_dir / "desktop-lyrics.json",
+                    lambda action: self.app.media_control(action, {}),
+                )
+            self.desktop_lyrics.show()
+            self.sync_lyrics_playback()
+        elif self.desktop_lyrics:
+            self.desktop_lyrics.hide()
+        self.sync_desktop_lyrics()
+
+    def destroy_desktop_lyrics(self, *_):
+        if self.desktop_lyrics:
+            self.desktop_lyrics.destroy()
+            self.desktop_lyrics = None
+
+    def sync_lyrics_playback(self):
+        if not self.desktop_lyrics_visible():
+            return
+        state = self.app.system_media.properties
+        playing = state["PlaybackStatus"].unpack() == "Playing"
+        self.desktop_lyrics.set_playback(
+            playing, state["CanPause" if playing else "CanPlay"].unpack(),
+            state["CanGoPrevious"].unpack(), state["CanGoNext"].unpack(),
+        )
+
+    def sync_desktop_lyrics(self):
+        if not self.get_window() or not is_player_uri(self.webview.get_uri()):
+            return
+        enabled = json.dumps(self.desktop_lyrics_visible())
+        self.webview.run_javascript("window.__musicDesktopLyrics?.setVisible(" + enabled + ")", None, None, None)
+        self.webview.run_javascript_in_world("window.updateDesktopLyricsSetting?.(" + enabled + ")",
+                                            CACHE_SETTINGS_WORLD, None, None, None)
+
+    def desktop_lyrics_settings_message(self, _manager, result):
+        if not self.get_window() or not is_player_uri(self.webview.get_uri()):
+            return
+        value = result.get_js_value().to_string()
+        if value == "read":
+            self.sync_desktop_lyrics()
+        elif value == "toggle":
+            self.show_desktop_lyrics(not self.desktop_lyrics_visible())
+        elif value in ("show", "hide"):
+            self.show_desktop_lyrics(value == "show")
+
+    def desktop_lyrics_message(self, _manager, result):
+        if not self.desktop_lyrics_visible() or not self.get_window() or not is_player_uri(self.webview.get_uri()):
+            return
+        try:
+            value = result.get_js_value().to_string()
+            message = json.loads(value) if len(value) <= 820000 else None
+        except (ValueError, TypeError):
+            return
+        if not isinstance(message, dict):
+            return
+        song = message.get("id")
+        if not isinstance(song, str) or len(song) > 13 or song and not (song.isascii() and song.isdecimal()):
+            return
+
+        def text(key, limit):
+            value = message.get(key)
+            if not isinstance(value, str):
+                return ""
+            return value[:limit].replace("\0", "").encode("utf-8", "replace").decode("utf-8")
+
+        lyrics = self.desktop_lyrics
+        event = message.get("event")
+        if event == "track":
+            lyrics.set_track(song, text("title", 220), text("stream", 40))
+            lyrics.clock(message.get("position"))
+        elif song and song == lyrics.song:
+            if event == "lyrics":
+                lyrics.set_lyrics(song, *(text(key, 180000) for key in
+                                  ("lrc", "yrc", "translation", "wordTranslation")), message.get("failed") is True)
+            elif event == "position" and not lyrics.stream:
+                lyrics.clock(message.get("position"), message.get("advancing") is True)
 
     def deliver_quality(self, identifier, data):
         if self.get_window() and is_player_uri(self.webview.get_uri()):

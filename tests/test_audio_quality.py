@@ -94,7 +94,11 @@ const factories={
  maps:function(module,exports){exports.q=new Map([[5999e3,"sky"],[4999e3,"jymaster"]]);exports.p=new Map([['jymaster',4999000]]);exports.b={4999:'jymaster',5999:"sky"};},
  bridge:function(module,exports){exports.AudioPlayer={getCacheProgressPercent(){return 1;},preLoad(){return this.getCacheProgressPercent();}};},
  progress:function(module,exports){
-  const subject=value=>({getValue:()=>value,next:next=>{value=next;},asObservable(){return this;}});
+  const subject=value=>{
+   const listeners=[];
+   return {getValue:()=>value,next:next=>{value=next;listeners.forEach(fn=>fn(next));},
+    subscribe:fn=>listeners.push(fn),asObservable(){return this;}};
+  };
   exports.b=subject(false);exports.c=subject({inSeek:!1});exports.d=subject(null);
   exports.d.asObservable();
  },
@@ -150,6 +154,35 @@ const select=level=>window.qualityTest.choose(window.qualityTest.find(level));
     def complete(self, level, **extra):
         data = dict(id=123, url='https://m10.music.126.net/music.flac', level=level, br=1234000, **extra)
         return self.snapshot('requests[0].resolve({code:200,data:[%s]});' % json.dumps(data))
+
+    def test_desktop_lyrics_cancels_the_previous_song_on_track_change(self):
+        self.evaluate('''
+const lyricMessages=[], lyricRequests=[];
+window.webkit={messageHandlers:{desktopLyrics:{postMessage:value=>lyricMessages.push(JSON.parse(value))}}};
+const fetch=(url,{signal})=>new Promise(resolve=>lyricRequests.push({url,signal,resolve}));
+const respond=(index,text)=>lyricRequests[index].resolve({ok:true,
+    json:async()=>({code:200,lrc:{lyric:text}})});
+const progress=requireModule('progress').d;
+delete progress.getValue;
+progress.next({playId:'123|play|token',current:41.5});
+let updates=0;
+store.subscribe(()=>updates++);
+''')
+        self.evaluate((Path(__file__).resolve().parents[1] / 'assets/desktop-lyrics.js').read_text())
+        self.assertEqual(self.evaluate("lyricRequests.length").to_int32(), 0)
+        self.snapshot('window.__musicDesktopLyrics.setVisible(true);')
+        self.assertAlmostEqual(self.evaluate("lyricMessages.find(m=>m.event==='position').position").to_double(), 41.5)
+        self.snapshot('state.playing.resourceTrackId=456;store.notify();')
+        self.assertEqual(self.evaluate('updates').to_int32(), 1)
+        self.assertTrue(self.evaluate('lyricRequests[0].signal.aborted').to_boolean())
+        self.snapshot('respond(0,"[00:02]Old");respond(1,"[00:03]New");')
+        messages = json.loads(self.evaluate("JSON.stringify(lyricMessages.filter(m=>m.event==='lyrics'))").to_string())
+        self.assertEqual([(m['id'], m['lrc']) for m in messages], [('456', '[00:03]New')])
+        self.snapshot('window.__musicDesktopLyrics.setVisible(false);state.playing.resourceTrackId=789;store.notify();')
+        self.assertEqual(self.evaluate("lyricRequests.length").to_int32(), 2)
+        self.snapshot('state.playing.resourceTrackId=null;window.__musicDesktopLyrics.setVisible(true);')
+        self.assertEqual(self.evaluate("lyricMessages.slice(-1)[0].event").to_string(), "track")
+        self.assertEqual(self.evaluate("lyricMessages.slice(-1)[0].id").to_string(), "")
 
     def test_settings_show_nine_choices_and_playback_buttons_share_one_menu(self):
         result = self.snapshot('window.qualityTest.place();window.qualityTest.place();')
