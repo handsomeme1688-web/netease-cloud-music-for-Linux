@@ -113,11 +113,25 @@ class AudioCache:
         self.client = AudioBuffer(api, proxy_mode, self.receive)
 
     def request(self, identifier, uri):
+        if (not isinstance(identifier, str) or not 0 < len(identifier) <= 64 or
+                not identifier.isascii() or not all(c.isalnum() or c in '-_' for c in identifier)):
+            return
         with self.lock:
-            if identifier in self.entries or len(self.entries) >= 2:
+            if identifier in self.entries or len(self.entries) >= 8:
                 self.send(identifier, 'failed', {})
                 return
-            self.entries[identifier] = {'chunks': [], 'size': 0, 'reserved': 0}
+            unique = {id(entry): entry for entry in self.entries.values()}.values()
+            ready = next((entry for entry in unique if entry.get('uri') == uri and 'data' in entry), None)
+            if ready is not None:
+                self.entries[identifier] = ready
+                self.send(identifier, 'head', {'bytes': ready['size']})
+                self.send(identifier, 'complete', {'bytes': ready['size'], 'mime': ready['mime'],
+                    'url': 'https://127.0.0.1:%d%s%s' % (self.server.server_port, self.prefix, identifier)})
+                return
+            if len({id(entry) for entry in self.entries.values()}) >= 2:
+                self.send(identifier, 'failed', {})
+                return
+            self.entries[identifier] = {'uri': uri, 'chunks': [], 'size': 0, 'reserved': 0}
         self.client.request(identifier, uri)
 
     def cancel(self, identifier):
@@ -144,7 +158,8 @@ class AudioCache:
                 return
             if event == 'head':
                 requested = value['bytes']
-                used = sum(item['reserved'] for key, item in self.entries.items() if key != identifier)
+                unique = {id(item): item for item in self.entries.values()}.values()
+                used = sum(item['reserved'] for item in unique if item is not entry)
                 if requested < 0 or requested + used > MAX_BYTES:
                     self.cancel(identifier)
                     self.send(identifier, 'failed', {})
@@ -155,7 +170,8 @@ class AudioCache:
                 data = base64.b64decode(value['data'])
                 entry['size'] += len(data)
                 entry['reserved'] = max(entry['reserved'], entry['size'])
-                if sum(item['reserved'] for item in self.entries.values()) > MAX_BYTES:
+                unique = {id(item): item for item in self.entries.values()}.values()
+                if sum(item['reserved'] for item in unique) > MAX_BYTES:
                     self.cancel(identifier)
                     self.send(identifier, 'failed', {})
                     return

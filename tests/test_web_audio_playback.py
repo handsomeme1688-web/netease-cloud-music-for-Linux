@@ -10,10 +10,15 @@ FIXTURE=r'''
 class URL{constructor(value){const m=/^(https?):\/\/([^/]+)/.exec(value);if(!m)throw new Error('URL');this.protocol=m[1]+':';this.hostname=m[2];}}
 const location={origin:'https://music.163.com',pathname:'/st/webplayer'};
 const window={addEventListener:()=>{}};const requests=[],opens=[],released=[];
-const setInterval=()=>1,clearInterval=()=>{},setTimeout=()=>1,clearTimeout=()=>{};
+let clock=0,timerId=0;const timers=new Map();Date.now=()=>clock;
+const setInterval=()=>1,clearInterval=()=>{};
+const setTimeout=(fn,ms)=>{timers.set(++timerId,{fn,at:clock+ms});return timerId;};
+const clearTimeout=id=>timers.delete(id);
+function advance(ms){const until=clock+ms;for(;;){const next=[...timers].sort((a,b)=>a[1].at-b[1].at)[0];
+ if(!next||next[1].at>until)break;clock=next[1].at;timers.delete(next[0]);next[1].fn();}clock=until;}
 class AbortController{constructor(){this.signal={aborted:false};}abort(){this.signal.aborted=true;}}
 class XMLHttpRequest{open(method,url){opens.push(url);}send(){this.onload();}abort(){this.aborted=true;}}
-window.__musicFetchNativeAudio=(url,signal)=>new Promise((resolve,reject)=>requests.push({url,signal,resolve,reject}));
+window.__musicFetchNativeAudio=(url,signal,progress)=>new Promise((resolve,reject)=>requests.push({url,signal,progress,resolve,reject}));
 function Howl(options){this.init(options);}
 Howl.prototype.init=function(options){this._src=options.src;this._webAudio=!options.html5;this._state='unloaded';this._queue=[];this.listeners={};return this;};
 Howl.prototype.load=function(){this.originalLoads=(this.originalLoads||0)+1;this._src=Array.isArray(this._src)?this._src[0]:this._src;const xhr=new XMLHttpRequest();xhr.open('GET',this._src);xhr.onload=()=>{this._state='loaded';this.emit('load');};xhr.send();return this;};
@@ -101,3 +106,19 @@ class WebAudioPlaybackTests(unittest.TestCase):
         self.assertTrue(self.evaluate('window.__musicNativeHowl()===h').to_boolean())
         self.snapshot('h.unload();')
         self.assertTrue(self.evaluate('window.__musicNativeHowl()===null').to_boolean())
+
+    def test_large_download_continues_while_bytes_advance(self):
+        result=self.snapshot('h.load();advance(25000);requests[0].progress(1024,90000000);advance(25000);')
+        self.assertFalse(result['aborted'][0])
+
+    def test_download_without_progress_times_out(self):
+        result=self.snapshot('h.load();advance(30001);')
+        self.assertTrue(result['aborted'][0])
+
+    def test_download_has_an_absolute_deadline(self):
+        result=self.snapshot('h.load();for(let i=0;i<40;i++){advance(25000);requests[0].progress(i+1,90000000);}')
+        self.assertTrue(result['aborted'][0])
+
+    def test_unloaded_download_progress_does_not_restart_its_timer(self):
+        self.snapshot('h.load();h.unload();requests[0].progress(1024,90000000);')
+        self.assertEqual(self.evaluate('timers.size').to_int32(),0)

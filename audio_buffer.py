@@ -6,8 +6,8 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import gi
 from gi.repository import Gio, GLib
 
-MAX_BYTES = 64 * 1024 * 1024
-# Bound each base64 decode on the page thread so controls remain responsive.
+MAX_BYTES = 192 * 1024 * 1024
+# Keep native transfers bounded, including large lossless tracks.
 CHUNK_BYTES = 64 * 1024
 
 
@@ -35,7 +35,7 @@ class AudioBuffer:
         self.api = api
         self.send = send
         self.jobs = {}
-        self.session = Soup.Session(timeout=20)
+        self.session = Soup.Session(timeout=30)
         if api == '4.0':
             self.session.props.ssl_strict = True
         if proxy_mode == 'direct':
@@ -91,7 +91,7 @@ class AudioBuffer:
         else:
             headers = message.request_headers
         headers.replace('Referer', 'https://music.163.com/')
-        headers.replace('User-Agent', 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0')
+        headers.replace('User-Agent', 'NeteaseMusicDesktop/3.1.17.204416')
         job['message'] = message
         if self.api == '4.1':
             self.session.send_async(message, GLib.PRIORITY_DEFAULT, job['cancel'], self.opened, job)

@@ -69,17 +69,29 @@
             }
             if (ticket) stop(this, ticket);
             ticket = {source, controller: new AbortController(), xhrs: new Set(),
-                timer: 0, release: null, url: null};
+                timer: 0, release: null, url: null, started: Date.now(), bytes: -1};
             tickets.set(this, ticket);
             this._state = 'loading';
-            ticket.timer = setTimeout(() => ticket.controller.abort(), 20000);
-            window.__musicFetchNativeAudio(source, ticket.controller.signal).then(response => {
+            const progress = bytes => {
+                if (ticket.controller.signal.aborted || tickets.get(this) !== ticket || bytes <= ticket.bytes) return;
+                ticket.bytes = bytes;
+                clearTimeout(ticket.timer);
+                const remaining = Math.max(1, 900000 - (Date.now() - ticket.started));
+                ticket.timer = setTimeout(() => ticket.controller.abort(), Math.min(30000, remaining));
+            };
+            progress(0);
+            window.__musicFetchNativeAudio(source, ticket.controller.signal, progress).then(response => {
                 if (tickets.get(this) !== ticket || ticket.controller.signal.aborted) { response.release(); return; }
                 ticket.url = response.url;
                 ticket.release = response.release;
                 clearTimeout(ticket.timer);
                 routes.set(source, ticket);
-                this.once('loaderror', () => { if (tickets.get(this) === ticket) stop(this, ticket); });
+                this.once('loaderror', () => {
+                    if (tickets.get(this) === ticket) {
+                        stop(this, ticket);
+                        if (window.dispatchEvent) window.dispatchEvent(new CustomEvent('music-audio-load-error', {detail: this}));
+                    }
+                });
                 this.once('load', () => {
                     // The decoded AudioBuffer owns its samples. Release the
                     // encoded copy as soon as decoding succeeds.
@@ -93,6 +105,7 @@
                 this._state = 'unloaded';
                 this._queue = [];
                 this._emit('loaderror', null, 'Audio could not be loaded');
+                if (window.dispatchEvent) window.dispatchEvent(new CustomEvent('music-audio-load-error', {detail: this}));
             });
             return this;
         };

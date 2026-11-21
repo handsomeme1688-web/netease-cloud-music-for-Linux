@@ -91,11 +91,36 @@ class AudioCacheTests(unittest.TestCase):
     def test_pending_and_completed_copies_share_one_budget(self):
         with patch('audio_cache.MAX_BYTES',16):
             self.store(data=b'1234567890')
-            self.cache.request('two','https://m10.music.126.net/fixture.mp3')
+            self.cache.request('two','https://m10.music.126.net/other.mp3')
             self.cache.receive('two','head',{'bytes':10})
             self.assertNotIn('two',self.cache.entries)
             self.assertIn('one',self.cache.entries)
             self.send.assert_called_with('two','failed',{})
+
+    def test_prepared_copy_is_reused_without_a_second_download(self):
+        self.store()
+        self.cache.request('player','https://m10.music.126.net/fixture.mp3')
+        self.assertEqual(self.cache.client.request.call_count,1)
+        self.assertIs(self.cache.entries['one'],self.cache.entries['player'])
+        url=self.send.call_args.args[2]['url']
+        self.cache.cancel('one')
+        with self.opener.open(url) as response:
+            self.assertEqual(response.read(),b'0123456789')
+
+    def test_shared_copy_is_counted_once_in_the_byte_budget(self):
+        with patch('audio_cache.MAX_BYTES',16):
+            self.store()
+            self.cache.request('player','https://m10.music.126.net/fixture.mp3')
+            self.cache.request('next','https://m10.music.126.net/next.mp3')
+            self.cache.receive('next','head',{'bytes':6})
+            self.assertIn('next',self.cache.entries)
+
+    def test_shared_copy_reference_count_is_bounded(self):
+        self.store()
+        for index in range(8):
+            self.cache.request('copy'+str(index),'https://m10.music.126.net/fixture.mp3')
+        self.assertEqual(len(self.cache.entries),8)
+        self.send.assert_called_with('copy7','failed',{})
 
     def test_unknown_length_downloads_are_also_bounded(self):
         with patch('audio_cache.MAX_BYTES',4):

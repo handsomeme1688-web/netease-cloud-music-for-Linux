@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.0.9"
+VERSION = "1.0.10"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 PLAYBACK_LOG_LIMIT = 2 * 1024 * 1024
@@ -58,6 +58,7 @@ except (ImportError, ValueError) as exc:
 from media_service import MediaService
 from audio_buffer import delivery_script
 from audio_cache import AudioCache
+from quality_service import QualityService
 
 if (Gtk.MAJOR_VERSION, Gtk.MINOR_VERSION) < (3, 24):
     print("需要 GTK 3.24 或更新的 GTK 3 版本。", file=sys.stderr)
@@ -533,9 +534,14 @@ class MusicWindow(Gtk.ApplicationWindow):
                 WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/*"], None))
             manager = self.webview.get_user_content_manager()
             self.audio_buffer = AudioCache(WEBKIT_API, app.proxy_mode, self.deliver_native_audio)
+            self.quality_service = QualityService(self.audio_buffer.client,
+                app.manager.get_cookie_manager(), self.deliver_quality)
+            manager.register_script_message_handler("musicQuality")
+            manager.connect("script-message-received::musicQuality", self.quality_message)
             certificate = Gio.TlsCertificate.new_from_pem(self.audio_buffer.certificate, -1)
             app.context.allow_tls_certificate_for_host(certificate, "127.0.0.1")
             self.connect("destroy", lambda *_: self.audio_buffer.close())
+            self.connect("destroy", lambda *_: self.quality_service.cancel_all())
             manager.register_script_message_handler("nativeAudio")
             manager.connect("script-message-received::nativeAudio", self.native_audio_message)
             readiness_script = Path(__file__).resolve().parent / "assets" / "media-readiness.js"
@@ -554,6 +560,10 @@ class MusicWindow(Gtk.ApplicationWindow):
             manager.add_script(WebKit2.UserScript.new(
                 state_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
                 WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/*"], None))
+            quality_script = Path(__file__).resolve().parent / "assets" / "audio-quality.js"
+            manager.add_script(WebKit2.UserScript.new(
+                quality_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/st/webplayer*"], None))
             buffer_script = Path(__file__).resolve().parent / "assets" / "buffered-playback.js"
             manager.add_script(WebKit2.UserScript.new(
                 buffer_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
@@ -892,6 +902,8 @@ class MusicWindow(Gtk.ApplicationWindow):
 
     def load_changed(self, view, event):
         if event == WebKit2.LoadEvent.STARTED:
+            if hasattr(self, "quality_service"):
+                self.quality_service.cancel_all()
             if hasattr(self, "audio_buffer"):
                 self.audio_buffer.cancel_all()
             if not self.is_popup:
@@ -963,6 +975,29 @@ class MusicWindow(Gtk.ApplicationWindow):
             self.audio_buffer.request(identifier, message.get("url"))
         elif message.get("event") == "cancel":
             self.audio_buffer.cancel(identifier)
+
+    def quality_message(self, _manager, result):
+        if not self.get_window() or not is_player_uri(self.webview.get_uri()):
+            return
+        try:
+            value = result.get_js_value().to_string()
+            message = json.loads(value) if len(value) <= 4096 else None
+        except (ValueError, TypeError):
+            return
+        if not isinstance(message, dict):
+            return
+        if message.get("event") == "cancel":
+            identifier = message.get("id")
+            if isinstance(identifier, str):
+                self.quality_service.cancel(identifier)
+        elif message.get("event") == "request":
+            self.quality_service.request(message.get("id"), message.get("params"))
+
+    def deliver_quality(self, identifier, data):
+        if self.get_window() and is_player_uri(self.webview.get_uri()):
+            source = 'window.__musicQualityResponse && window.__musicQualityResponse(%s,%s)' % (
+                json.dumps(identifier), json.dumps(data))
+            self.webview.run_javascript(source, None, None, None)
 
     def deliver_native_audio(self, identifier, event, data, continuation=None):
         if not self.get_window() or not is_player_uri(self.webview.get_uri()):

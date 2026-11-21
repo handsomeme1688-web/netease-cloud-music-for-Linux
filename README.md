@@ -1,7 +1,7 @@
 # 网易云音乐 · Linux 独立窗口版
 
 网易云音乐的非官方 Linux 客户端，基于 Python、GTK 3 和 WebKitGTK，无需 Chrome、Chromium 或 Electron。
-支持扫码登录、高分屏、无边框窗口和系统媒体控制。
+支持扫码登录、音质选择、高分屏、无边框窗口和系统媒体控制。
 
 **[下载安装包](https://github.com/handsomeme1688-web/netease-cloud-music-for-Linux/releases/latest) · [反馈问题](https://github.com/handsomeme1688-web/netease-cloud-music-for-Linux/issues)**
 
@@ -14,7 +14,7 @@
 下载 `.deb` 后，在安装包所在目录运行：
 
 ```sh
-sudo apt install ./netease-cloud-music-webkit_1.0.9_all.deb
+sudo apt install ./netease-cloud-music-webkit_1.0.10_all.deb
 ```
 
 APT 自动安装依赖。安装后在应用菜单中打开“网易云音乐”，点击右上角“登录”扫码。账号、曲库和会员权限由官方网页提供。
@@ -55,6 +55,10 @@ bash install.sh
 [自动安装与回归检查](https://github.com/handsomeme1688-web/netease-cloud-music-for-Linux/actions/workflows/compatibility.yml)覆盖 Debian 11 / 12 / 13 和 Ubuntu 20.04 / 22.04 / 24.04 / 26.04，采用容器测试；桌面实测环境为 Ubuntu 26.04。
 
 ## 使用
+
+点击底部音质按钮选择标准、极高、无损、Hi-Res、高清臻音、超清母带、沉浸环绕声或臻音全景声。菜单按账号与歌曲权限显示可选项，保存音质偏好，并显示实际播放档位。
+
+臻音全景声需要播放引擎支持 AV3A 解码；缺少支持时，菜单会注明并灰显该项。
 
 拖动窗口顶部空白处移动窗口，双击可最大化或还原；拖动边缘或四角调整大小。关闭窗口会停止播放。
 
