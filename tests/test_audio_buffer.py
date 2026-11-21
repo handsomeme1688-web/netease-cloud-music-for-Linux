@@ -13,7 +13,7 @@ from gi.repository import GLib
 class AudioBufferTests(unittest.TestCase):
     def setUp(self):
         self.send = Mock()
-        self.buffer = AudioBuffer(app.WEBKIT_API, 'direct', self.send)
+        self.buffer = AudioBuffer(app.WEBKIT_API, self.send)
 
     def job(self, size=0, declared=0):
         job = {'id': 'fixture-1', 'cancel': app.Gio.Cancellable(), 'stream': Mock(),
@@ -36,7 +36,7 @@ class AudioBufferTests(unittest.TestCase):
             start.assert_not_called()
         self.send.assert_called_once_with('fixture-1', 'failed', {})
 
-    def test_direct_mode_uses_explicit_direct_proxy_resolver(self):
+    def test_audio_always_uses_explicit_direct_proxy_resolver(self):
         self.assertIsInstance(self.buffer.session.props.proxy_resolver, app.Gio.SimpleProxyResolver)
         self.assertEqual(self.buffer.session.props.proxy_resolver.lookup(
             'https://m10.music.126.net/fixture.mp3', None), ['direct://'])
@@ -90,7 +90,7 @@ class AudioBufferTests(unittest.TestCase):
                     'http://127.0.0.1:%d/fixture.mp3' % server.server_port)):
                 self.buffer.request('fixture-1', 'https://m10.music.126.net/fixture.mp3')
             loop.run()
-            self.assertEqual(heads, [{'bytes': len(payload)}])
+            self.assertEqual(heads, [{'bytes': len(payload), 'mime': 'audio/mpeg'}])
             self.assertEqual(outcomes, [('complete', {'bytes': len(payload), 'mime': 'audio/mpeg'})])
             self.assertEqual(b''.join(chunks), payload)
             self.assertEqual(requests, [('/fixture.mp3', 'https://music.163.com/')])

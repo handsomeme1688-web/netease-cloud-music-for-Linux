@@ -25,6 +25,10 @@ class Element{
  constructor(tag){this.tagName=tag;this.children=[];this.dataset={};this.style={setProperty(name,value){this[name]=value;}};this.attrs={};this.events={};this.textContent='';this.disabled=false;}
  appendChild(node){this.children.push(node);node.parentNode=this;return node;}
  insertBefore(node){this.children.unshift(node);node.parentNode=this;}
+ get firstChild(){return this.children[0]||null;}
+ closest(selector){for(let node=this;node;node=node.parentNode){
+  if((node.className||'').split(' ').includes(selector.slice(1)))return node;
+ }return null;}
  setAttribute(name,value){this.attrs[name]=value;}
  getAttribute(name){return this.attrs[name];}
  addEventListener(name,fn){this.events[name]=fn;}
@@ -43,8 +47,12 @@ class Element{
 }
 const document={head:new Element('head'),body:new Element('body'),activeElement:null,
  createElement:tag=>new Element(tag),addEventListener:()=>{},
- querySelectorAll:selector=>selector.startsWith('#page_pc_mini_bar')?[bar]:document.body.querySelectorAll(selector)};
+ querySelector:selector=>selector==='#page_pc_setting #play > .play'?settings:document.body.querySelector(selector),
+ querySelectorAll:selector=>selector.startsWith('#page_pc_mini_bar')?(detailVisible?[bar,detailBar]:[bar]):document.body.querySelectorAll(selector)};
 const bar=new Element('div');document.body.appendChild(bar);
+const settings=new Element('div');document.body.appendChild(settings);
+const detailBar=new Element('div');detailBar.className='vinyl-page-bar-wrapper';
+let detailVisible=false;
 class MutationObserver{constructor(fn){this.callback=fn;}observe(){}disconnect(){}}
 let state={host:{isPlusVip:true,isVinylVip:true,isAnonymous:false},configCenter:{},
  setting:{quantity:{listen:320,listenReg:320,listenAnon:192}},
@@ -57,7 +65,9 @@ const store={getState:()=>state,subscribe:fn=>(subscribers.push(fn),()=>{}),noti
   if(action.type==='playing/pause'){howl.paused=true;state.playing.playingState=1;}
   store.notify();return action;
  }};
-const howl={_state:'loaded',paused:false,seek:()=>42.5,playing:()=>!howl.paused};
+const loadCallbacks=[];
+const howl={_state:'loaded',paused:false,seek:()=>42.5,playing:()=>!howl.paused,
+ once:(event,callback)=>{if(event==='load')loadCallbacks.push(callback);}};
 window.__musicNativeHowl=()=>howl;
 const preparations=[],released=[];
 class AbortController{constructor(){const listeners=new Set();this.signal={aborted:false,addEventListener:(_,fn)=>listeners.add(fn),removeEventListener:(_,fn)=>listeners.delete(fn)};this.listeners=listeners;}abort(){this.signal.aborted=true;for(const fn of this.listeners)fn();}}
@@ -89,7 +99,7 @@ class AudioQualityTests(unittest.TestCase):
             self.evaluate('window.webkit={messageHandlers:{musicQuality:{postMessage:value=>nativeMessages.push(JSON.parse(value))}}};')
         source = (Path(__file__).resolve().parents[1] / 'assets/audio-quality.js').read_text()
         # Test-only access to the controller; the distributed script keeps it private.
-        source = source.rsplit('})();', 1)[0] + '\nwindow.qualityTest={find,choose,availability,sync,place};\n})();'
+        source = source.rsplit('})();', 1)[0] + '\nwindow.qualityTest={find,choose,sync,place};\n})();'
         self.evaluate(source)
         self.evaluate('''
 const oldPush=window.webpackJsonp.push.bind(window.webpackJsonp);
@@ -115,7 +125,9 @@ const select=level=>window.qualityTest.choose(window.qualityTest.find(level));
             time.sleep(.001)
         return json.loads(self.evaluate('''JSON.stringify({actions,nativeMessages,released,preparations:preparations.map(p=>({aborted:p.signal.aborted})),requests:requests.map(r=>r.params),
  preference:state.setting.quantity.listenReg,
- button:document.body.querySelector('.ncm-quality-button').textContent,
+ button:document.body.querySelector('.ncm-quality-mini').textContent,
+ settings:document.body.querySelector('.ncm-quality-setting').textContent,
+ detail:document.body.querySelector('.ncm-quality-detail').textContent,
  footer:document.body.querySelector('.ncm-quality-footer').textContent,
  rows:document.body.querySelectorAll('.ncm-quality-row').map(r=>({level:r.dataset.level,disabled:r.disabled,checked:r.getAttribute('aria-checked')}))})''').to_string())
 
@@ -123,10 +135,11 @@ const select=level=>window.qualityTest.choose(window.qualityTest.find(level));
         data = dict(id=123, url='https://m10.music.126.net/music.flac', level=level, br=1234000, **extra)
         return self.snapshot('requests[0].resolve({code:200,data:[%s]});' % json.dumps(data))
 
-    def test_bootstrap_replacement_keeps_one_button_and_nine_choices(self):
+    def test_each_entry_reuses_one_menu_with_nine_choices(self):
         result = self.snapshot('window.qualityTest.place();window.qualityTest.place();')
         self.assertEqual(len(result['rows']), 9)
-        self.assertEqual(self.evaluate("document.body.querySelectorAll('.ncm-quality-button').length").to_int32(), 1)
+        self.assertEqual(self.evaluate("document.body.querySelectorAll('.ncm-quality-button').length").to_int32(), 3)
+        self.assertEqual(self.evaluate("settings.querySelectorAll('.ncm-quality-setting').length").to_int32(), 1)
 
     def test_vivid_extends_request_and_response_mapping(self):
         self.assertEqual(self.evaluate("requireModule('maps').q.get(6999000)").to_string(), 'vivid')
@@ -140,7 +153,7 @@ const select=level=>window.qualityTest.choose(window.qualityTest.find(level));
         result = self.snapshot('detailRequests[0].resolve({data:{l:{size:1},m:{size:1},h:{size:1},jm:{size:166000000},vi:{size:27000000}}});')
         self.assertFalse(next(r for r in result['rows'] if r['level']=='jymaster')['disabled'])
         self.assertFalse(next(r for r in result['rows'] if r['level']=='vivid')['disabled'])
-        self.assertTrue(next(r for r in result['rows'] if r['level']=='lossless')['disabled'])
+        self.assertFalse(next(r for r in result['rows'] if r['level']=='lossless')['disabled'])
 
     def test_reopening_menu_reuses_song_detail(self):
         self.snapshot('document.body.querySelector(".ncm-quality-button").click();')
@@ -159,9 +172,12 @@ const select=level=>window.qualityTest.choose(window.qualityTest.find(level));
         result = self.snapshot('state.host={isAnonymous:true};store.notify();')
         self.assertEqual({r['level'] for r in result['rows'] if not r['disabled']}, {'standard', 'higher'})
 
-    def test_missing_song_quality_is_disabled(self):
+    def test_missing_song_quality_can_be_saved_as_the_default(self):
         result = self.snapshot('state.playing.curPlaying.track.available=[128,192,320];store.notify();')
-        self.assertTrue(next(r for r in result['rows'] if r['level']=='lossless')['disabled'])
+        self.assertFalse(next(r for r in result['rows'] if r['level']=='lossless')['disabled'])
+        result = self.snapshot('select("lossless");')
+        self.assertEqual(result['settings'], '无损')
+        self.assertEqual(result['requests'][0]['level'], 'lossless')
 
     def test_lossless_request_uses_flac_and_keeps_current_position(self):
         result = self.snapshot('select("lossless");')
@@ -174,8 +190,8 @@ const select=level=>window.qualityTest.choose(window.qualityTest.find(level));
     def test_quality_copy_is_prepared_while_old_audio_keeps_playing(self):
         self.snapshot('enablePreparation();select("lossless");')
         result = self.complete('lossless')
-        self.assertEqual(result['actions'], [])
-        self.assertEqual(result['preference'],320)
+        self.assertEqual([a['type'] for a in result['actions']], ['setting/updateQuantity'])
+        self.assertEqual(result['preference'],999)
         self.assertTrue(self.evaluate('howl.playing()').to_boolean())
         result = self.snapshot('preparations[0].resolve({release:()=>released.push(1)});')
         self.assertEqual(result['actions'][-1]['type'],'playing/switchQuality')
@@ -197,7 +213,7 @@ const select=level=>window.qualityTest.choose(window.qualityTest.find(level));
         self.complete('lossless')
         result = self.snapshot('state.playing.resourceTrackId=456;store.notify();preparations[0].resolve({release:()=>released.push(1)});')
         self.assertTrue(result['preparations'][0]['aborted'])
-        self.assertEqual(result['actions'],[])
+        self.assertEqual([a['type'] for a in result['actions']], ['setting/updateQuantity'])
         self.assertEqual(result['released'],[1])
 
     def test_track_change_during_switch_discards_the_old_seek_position(self):
@@ -272,22 +288,22 @@ preparations[0].resolve({release:()=>released.push(1)});
         self.assertEqual(result['requests'], [])
         self.assertEqual(result['actions'], [])
 
-    def test_failed_preflight_leaves_playback_and_preference_untouched(self):
+    def test_failed_preflight_preserves_current_audio_and_saves_default(self):
         self.snapshot('select("lossless");')
         result = self.snapshot('requests[0].reject(new Error("network"));')
-        self.assertEqual(result['actions'], [])
-        self.assertEqual(result['preference'], 320)
+        self.assertEqual([a['type'] for a in result['actions']], ['setting/updateQuantity'])
+        self.assertEqual(result['preference'], 999)
         self.assertEqual(result['button'], '极高')
 
     def test_trial_response_does_not_replace_the_complete_current_song(self):
         self.snapshot('select("lossless");')
         result = self.complete('lossless', freeTrialInfo={'start':0,'end':30})
-        self.assertEqual(result['actions'], [])
+        self.assertEqual([a['type'] for a in result['actions']], ['setting/updateQuantity'])
 
     def test_track_change_cancels_late_quality_result(self):
         self.snapshot('select("lossless");state.playing.resourceTrackId=456;store.notify();')
         result = self.complete('lossless')
-        self.assertEqual(result['actions'], [])
+        self.assertEqual([a['type'] for a in result['actions']], ['setting/updateQuantity'])
 
     def test_server_fallback_displays_actual_quality_and_remembers_preference(self):
         self.snapshot('select("jymaster");')
@@ -315,16 +331,49 @@ preparations[0].resolve({release:()=>released.push(1)});
         self.snapshot('select("jymaster");')
         self.complete('exhigh')
         result = self.snapshot('state.playing.resourceTrackId=456;store.notify();')
-        self.assertNotIn('已保存偏好', result['footer'])
+        self.assertNotIn('当前歌曲使用', result['footer'])
 
     def test_repeated_click_does_not_start_competing_switches(self):
         result = self.snapshot('select("lossless");select("hires");')
         self.assertEqual(len(result['requests']), 1)
 
-    def test_loading_song_is_left_undisturbed(self):
+    def test_loading_song_defers_switch_but_saves_default_immediately(self):
         result = self.snapshot('howl._state="loading";select("lossless");')
         self.assertEqual(result['requests'], [])
-        self.assertEqual(result['actions'], [])
+        self.assertEqual(result['preference'], 999)
+        result = self.snapshot('''
+howl._state='loaded';loadCallbacks.forEach(callback=>callback());
+for(const timer of [...timers.values()])if(timer.delay===0)timer.fn();
+''')
+        self.assertEqual(result['requests'][0]['level'], 'lossless')
+
+    def test_settings_and_both_playback_buttons_share_one_selection(self):
+        result = self.snapshot('''
+document.body.querySelector('.ncm-quality-setting').click();
+document.body.querySelectorAll('.ncm-quality-row').find(row=>row.dataset.level==='lossless').click();
+''')
+        self.assertEqual(result['settings'], '无损')
+        self.assertEqual(result['requests'][0]['level'], 'lossless')
+        self.assertTrue(next(r for r in result['rows'] if r['level']=='lossless')['checked']=='true')
+        self.complete('lossless')
+        result = self.snapshot('''
+state.playing.resourcePlayingQuality=999;store.notify();
+detailVisible=true;window.qualityTest.place();
+document.body.querySelector('.ncm-quality-detail').click();
+document.body.querySelectorAll('.ncm-quality-row').find(row=>row.dataset.level==='higher').click();
+''')
+        self.assertEqual(result['settings'], '较高')
+        self.assertEqual(result['requests'][-1]['level'], 'higher')
+        self.snapshot('requests[1].resolve({data:[{id:123,level:"higher",url:"https://m10.music.126.net/track.mp3"}]});')
+        result = self.snapshot('''
+state.playing.resourcePlayingQuality=192;store.notify();
+detailVisible=false;window.qualityTest.place();
+document.body.querySelector('.ncm-quality-mini').click();
+document.body.querySelectorAll('.ncm-quality-row').find(row=>row.dataset.level==='standard').click();
+''')
+        self.assertEqual(result['settings'], '标准')
+        self.assertEqual(result['requests'][-1]['level'], 'standard')
+        self.assertTrue(self.evaluate("document.body.querySelector('.ncm-quality-detail').hidden").to_boolean())
 
     def test_empty_queue_saves_preference_without_loading_audio(self):
         result = self.snapshot('state.playing.resourceTrackId=0;select("lossless");')

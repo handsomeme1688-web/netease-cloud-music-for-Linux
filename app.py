@@ -7,14 +7,13 @@ import json
 import os
 from pathlib import Path
 import sys
-import tempfile
 import time
 import weakref
 from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.0.11"
+VERSION = "1.0.12"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 PLAYBACK_LOG_LIMIT = 2 * 1024 * 1024
@@ -36,6 +35,7 @@ try:
     import gi
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
+    gi.require_version("Gst", "1.0")
     WEBKIT_API = None
     for api in ("4.1", "4.0"):
         try:
@@ -59,6 +59,7 @@ from media_service import MediaService
 from audio_buffer import delivery_script
 from audio_cache import AudioCache
 from quality_service import QualityService
+from stream_player import StreamPlayer
 
 if (Gtk.MAJOR_VERSION, Gtk.MINOR_VERSION) < (3, 24):
     print("需要 GTK 3.24 或更新的 GTK 3 版本。", file=sys.stderr)
@@ -78,57 +79,11 @@ def private_directory(base, fallback):
     return path
 
 
-def network_settings_path():
-    base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-    if not base.is_absolute():
-        base = Path.home() / ".config"
-    return base / STORAGE_NAME / "network.json"
-
-
-def read_proxy_mode(path=None):
-    path = network_settings_path() if path is None else Path(path)
-    try:
-        settings = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(settings, dict) and settings.get("proxy_mode") in ("system", "direct"):
-            return settings["proxy_mode"]
-    except (OSError, ValueError):
-        pass
-    return "system"
-
-
-def save_proxy_mode(mode, path=None):
-    if mode not in ("system", "direct"):
-        raise ValueError("未知的网络连接方式")
-    path = network_settings_path() if path is None else Path(path)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
-                                         prefix=".network-", delete=False) as stream:
-            temporary = Path(stream.name)
-            json.dump({"proxy_mode": mode}, stream)
-            stream.write("\n")
-        temporary.replace(path)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-
-
-def apply_proxy_mode(manager, context, mode):
-    if mode not in ("system", "direct"):
-        raise ValueError("未知的网络连接方式")
-    proxy_mode = WebKit2.NetworkProxyMode.DEFAULT
-    settings = None
-    if mode == "direct":
-        # An explicit empty proxy configuration also replaces an active route.
-        # NO_PROXY can leave a running session on its previous system proxy.
-        proxy_mode = WebKit2.NetworkProxyMode.CUSTOM
-        settings = WebKit2.NetworkProxySettings.new(None, ["*"])
-    if hasattr(manager, "set_network_proxy_settings"):
-        manager.set_network_proxy_settings(proxy_mode, settings)
-    else:
-        # WebKitGTK 2.28/2.30 expose this setting on the context instead.
-        context.set_network_proxy_settings(proxy_mode, settings)
+def configure_direct_connection(manager, context):
+    # WebKitGTK 2.28/2.30 expose this setting on the context.
+    target = manager if hasattr(manager, "set_network_proxy_settings") else context
+    settings = WebKit2.NetworkProxySettings.new(None, ["*"])
+    target.set_network_proxy_settings(WebKit2.NetworkProxyMode.CUSTOM, settings)
 
 
 def supported_uri(uri):
@@ -244,8 +199,7 @@ class MusicApplication(Gtk.Application):
             str(self.data_dir / "cookies.sqlite"), WebKit2.CookiePersistentStorage.SQLITE)
         self.context = WebKit2.WebContext.new_with_website_data_manager(self.manager)
         self.context.set_sandbox_enabled(True)
-        self.proxy_mode = read_proxy_mode()
-        apply_proxy_mode(self.manager, self.context, self.proxy_mode)
+        configure_direct_connection(self.manager, self.context)
         self.context.connect("download-started", self.on_download)
         self.start_login_watch()
 
@@ -533,13 +487,17 @@ class MusicWindow(Gtk.ApplicationWindow):
                 WebKit2.UserContentInjectedFrames.TOP_FRAME,
                 WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/*"], None))
             manager = self.webview.get_user_content_manager()
-            self.audio_buffer = AudioCache(WEBKIT_API, app.proxy_mode, self.deliver_native_audio)
+            self.audio_buffer = AudioCache(WEBKIT_API, self.deliver_native_audio, app.cache_dir / "audio")
+            self.stream_player = StreamPlayer(self.audio_buffer, self.deliver_stream)
+            manager.register_script_message_handler("streamPlayer")
+            manager.connect("script-message-received::streamPlayer", self.stream_message)
             self.quality_service = QualityService(self.audio_buffer.client,
                 app.manager.get_cookie_manager(), self.deliver_quality)
             manager.register_script_message_handler("musicQuality")
             manager.connect("script-message-received::musicQuality", self.quality_message)
             certificate = Gio.TlsCertificate.new_from_pem(self.audio_buffer.certificate, -1)
             app.context.allow_tls_certificate_for_host(certificate, "127.0.0.1")
+            self.connect("destroy", lambda *_: self.stream_player.close())
             self.connect("destroy", lambda *_: self.audio_buffer.close())
             self.connect("destroy", lambda *_: self.quality_service.cancel_all())
             manager.register_script_message_handler("nativeAudio")
@@ -551,6 +509,10 @@ class MusicWindow(Gtk.ApplicationWindow):
             native_script = Path(__file__).resolve().parent / "assets" / "native-audio.js"
             manager.add_script(WebKit2.UserScript.new(
                 native_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/st/webplayer*"], None))
+            streaming_script = Path(__file__).resolve().parent / "assets" / "native-streaming.js"
+            manager.add_script(WebKit2.UserScript.new(
+                streaming_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
                 WebKit2.UserScriptInjectionTime.START, ["https://music.163.com/st/webplayer*"], None))
             decoded_script = Path(__file__).resolve().parent / "assets" / "web-audio-playback.js"
             manager.add_script(WebKit2.UserScript.new(
@@ -628,10 +590,6 @@ class MusicWindow(Gtk.ApplicationWindow):
         retry = Gtk.Button(label="重新加载")
         retry.connect("clicked", self.app.recover_player)
         error_box.pack_start(retry, False, False, 0)
-        self.network_button = Gtk.Button()
-        self.update_network_button()
-        self.network_button.connect("clicked", self.switch_proxy_mode)
-        error_box.pack_start(self.network_button, False, False, 0)
         self.stack.add_named(error_box, "error")
         self.create_window_controls()
         self.create_window_interaction()
@@ -644,26 +602,6 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.connect("window-state-event", self.window_state_changed)
         self.show_all()
         self.update_window_interaction()
-
-    def update_network_button(self):
-        self.network_button.set_label("使用直连并记住" if self.app.proxy_mode == "system"
-                                      else "使用系统代理并记住")
-        self.network_button.set_tooltip_text("只更改本应用的连接方式，下次启动继续使用。")
-
-    def switch_proxy_mode(self, *_):
-        mode = "direct" if self.app.proxy_mode == "system" else "system"
-        try:
-            save_proxy_mode(mode)
-        except OSError as exc:
-            self.message("无法保存网络设置", str(exc))
-            return
-        self.webview.stop_loading()
-        apply_proxy_mode(self.app.manager, self.app.context, mode)
-        self.app.proxy_mode = mode
-        for window in self.app.get_windows():
-            if isinstance(window, MusicWindow):
-                window.update_network_button()
-        self.webview.load_uri(HOME_URL)
 
     def create_window_controls(self):
         # Native controls float over the page; there is no title bar or toolbar,
@@ -902,6 +840,8 @@ class MusicWindow(Gtk.ApplicationWindow):
 
     def load_changed(self, view, event):
         if event == WebKit2.LoadEvent.STARTED:
+            if hasattr(self, "stream_player"):
+                self.stream_player.close()
             if hasattr(self, "quality_service"):
                 self.quality_service.cancel_all()
             if hasattr(self, "audio_buffer"):
@@ -993,8 +933,26 @@ class MusicWindow(Gtk.ApplicationWindow):
         elif message.get("event") == "request":
             self.quality_service.request(message.get("id"), message.get("params"))
 
+    def stream_message(self, _manager, result):
+        if not self.get_window() or not is_player_uri(self.webview.get_uri()):
+            return
+        try:
+            text = result.get_js_value().to_string()
+            message = json.loads(text) if len(text) <= 12288 else None
+        except (ValueError, TypeError):
+            return
+        if isinstance(message, dict):
+            self.stream_player.command(message)
+
+    def deliver_stream(self, identifier, event, state):
+        if self.get_window() and is_player_uri(self.webview.get_uri()):
+            script = "window.__musicStreamEvent && window.__musicStreamEvent(%s,%s,%s)" % (
+                json.dumps(identifier), json.dumps(event), json.dumps(state))
+            self.webview.run_javascript(script, None, None, None)
+
     def deliver_quality(self, identifier, data):
         if self.get_window() and is_player_uri(self.webview.get_uri()):
+            self.audio_buffer.authorize_sources(data)
             source = 'window.__musicQualityResponse && window.__musicQualityResponse(%s,%s)' % (
                 json.dumps(identifier), json.dumps(data))
             self.webview.run_javascript(source, None, None, None)
@@ -1081,7 +1039,7 @@ class MusicWindow(Gtk.ApplicationWindow):
                     return False
                 if (response.get_mime_type() in ("text/html", "application/xhtml+xml")
                         and 200 <= response.get_status_code() < 300):
-                    # Render the entry document even if a server or proxy adds
+                    # Render the entry document even if a server adds
                     # Content-Disposition: attachment to an HTML response.
                     decision.use()
                 else:
@@ -1140,18 +1098,7 @@ def main():
     parser = argparse.ArgumentParser(description="网易云音乐独立 WebKitGTK 桌面应用")
     parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--check", action="store_true", help="检查运行依赖，不打开窗口")
-    parser.add_argument("--set-proxy-mode", choices=("system", "direct"),
-                        help="保存本应用的网络方式后退出：system 使用系统代理，direct 使用直连")
     args = parser.parse_args()
-    if args.set_proxy_mode:
-        try:
-            save_proxy_mode(args.set_proxy_mode)
-        except OSError as exc:
-            print(f"无法保存网络设置：{exc}", file=sys.stderr)
-            return 1
-        label = "直连" if args.set_proxy_mode == "direct" else "系统代理"
-        print(f"已保存本应用的网络方式：{label}。请完全退出应用后重新打开。")
-        return 0
     if args.check:
         print(f"应用 {VERSION}; Python {sys.version.split()[0]}; "
               f"GTK {Gtk.MAJOR_VERSION}.{Gtk.MINOR_VERSION}.{Gtk.MICRO_VERSION}; "
@@ -1159,7 +1106,7 @@ def main():
         api = "evaluate_javascript" if hasattr(WebKit2.WebView, "evaluate_javascript") else "run_javascript"
         print(f"JavaScript 接口：{api}; 桌面会话：{os.environ.get('XDG_SESSION_TYPE', '未设置')}; "
               f"显示后端：{os.environ.get('GDK_BACKEND', '自动')}")
-        print(f"已保存的网络方式：{read_proxy_mode()}")
+        print("网络方式：直连")
         return 0
     os.umask(0o077)
     app = MusicApplication()

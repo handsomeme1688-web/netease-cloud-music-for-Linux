@@ -59,6 +59,8 @@
         const init = proto.init, load = proto.load, unload = proto.unload, play = proto.play;
         proto.init = function (options) {
             const source = options && (Array.isArray(options.src) ? options.src[0] : options.src);
+            if (eligible(source) && window.__musicStreamingHowl && window.__musicStreamingHowl(this, options, source))
+                return this;
             if (eligible(source)) options = Object.assign({}, options, {html5: false});
             return init.call(this, options);
         };
@@ -137,7 +139,8 @@
         };
         return true;
     }
-    Object.defineProperty(window, '__musicNativeHowl', {value: () => active});
+    Object.defineProperty(window, '__musicNativeHowl', {value: () =>
+        window.__musicStreamingActive && window.__musicStreamingActive() || active});
     const descriptor = Object.getOwnPropertyDescriptor(window, 'Howl');
     if (!descriptor || descriptor.configurable) {
         let value = descriptor && descriptor.value;

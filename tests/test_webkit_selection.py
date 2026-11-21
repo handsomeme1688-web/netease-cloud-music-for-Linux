@@ -32,7 +32,7 @@ def require_version(namespace, version):
         if version not in available:
             raise ValueError("fixture typelib unavailable: " + version)
         selected_api = version
-    elif (namespace, version) not in (("Gtk", "3.0"), ("Gdk", "3.0")):
+    elif (namespace, version) not in (("Gtk", "3.0"), ("Gdk", "3.0"), ("Gst", "1.0")):
         raise AssertionError("unexpected namespace requirement")
 """
 
@@ -70,6 +70,7 @@ WebKit2 = SimpleNamespace(
 Gdk = SimpleNamespace()
 Gio = SimpleNamespace()
 GLib = SimpleNamespace()
+Gst = SimpleNamespace()
 """
 
 
