@@ -11,6 +11,30 @@
 
 适用于 Debian / Ubuntu 桌面，需要 X11 或 Wayland、会话 D-Bus、音频输出和网络。应用始终使用直连。
 
+### 使用 APT 软件源
+
+配置一次后，网易云音乐可随系统一起更新。已经通过 `.deb` 安装的用户也可以添加此源，继续使用原来的登录、设置和缓存。
+
+```sh
+(
+  set -e
+  repo='https://handsomeme1688-web.github.io/netease-cloud-music-for-Linux/apt/'
+  fingerprint='D85075468B056509564B78D9F85270F94961FB3B'
+  key=$(mktemp)
+  trap 'rm -f "$key"' EXIT
+  curl -fsSL "${repo}archive-key.asc" -o "$key"
+  sudo install -D -m 0644 "$key" /etc/apt/keyrings/netease-cloud-music.asc
+  printf 'deb [signed-by=/etc/apt/keyrings/netease-cloud-music.asc,%s] %s ./\n' "$fingerprint" "$repo" |
+    sudo tee /etc/apt/sources.list.d/netease-cloud-music.list >/dev/null
+  sudo apt update
+  sudo apt install netease-cloud-music-webkit
+)
+```
+
+以后运行 `sudo apt update && sudo apt upgrade` 即可升级。
+
+### 下载安装包
+
 下载 `.deb` 后，在安装包所在目录运行：
 
 ```sh
@@ -109,6 +133,8 @@ sudo apt remove netease-cloud-music-webkit
 ```sh
 bash build-package.sh ./dist
 ```
+
+发布新版时，在签名机器上运行 `bash packaging/build-apt-repository.sh <安装包.deb> <gh-pages检出目录>/apt <签名密钥指纹>`，再提交并推送 `gh-pages`。生成脚本依赖 `dpkg-dev` 和 GnuPG，用 `GNUPGHOME` 指定签名密钥目录。
 
 安装运行依赖和 `nodejs` 后执行测试：
 
