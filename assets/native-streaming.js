@@ -194,6 +194,7 @@
     Object.defineProperties(window, {
         __musicStreamingHowl: {value: adapt},
         __musicStreamingActive: {value: () => active && active.howl},
+        __musicStreamingId: {value: () => active && active.id},
         __musicPrepareTransition: {value: (howl, url, duration, valid) => {
             if (active && active.howl === howl) active.prepare(url, duration, valid);
         }},
