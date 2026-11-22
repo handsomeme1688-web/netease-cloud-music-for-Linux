@@ -2,9 +2,9 @@ Origin: NetEase Cloud Music for Linux
 Label: NetEase Cloud Music for Linux
 Suite: ./
 Codename: ./
-Date: Sat, 21 Nov 2026 15:13:53 +0000
+Date: Sun, 22 Nov 2026 07:51:24 +0000
 Acquire-By-Hash: yes
 Description: NetEase Cloud Music packages for Debian and Ubuntu
 SHA256:
- ba34e1fdbd0741297dcf0f9e660e982d6f06315f0c5432e4e12dd57d53b3da1b 1193 Packages
- 77e64ac3a8b71e71dbc6340279195aee57cc2d8282d533d6c7e736c44f72929e 729 Packages.gz
+ e91b7524fc3c37b4b8c8572da1e82ab47290ea6e6b90b2da11d862145d54d6b7 1211 Packages
+ 79c322f0e01b4f38208e76cf6880595d824606b23965c1acbc1270f75bdfd66e 734 Packages.gz
