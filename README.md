@@ -13,7 +13,7 @@
 
 ### 使用 APT 软件源
 
-配置一次后，网易云音乐可随系统一起更新。已经通过 `.deb` 安装的用户也可以添加此源，继续使用原来的登录、设置和缓存。
+软件源只需配置一次。已经通过 `.deb` 安装的用户也可以添加此源，继续使用原来的登录、设置和缓存。
 
 ```sh
 (
@@ -31,7 +31,15 @@
 )
 ```
 
-以后运行 `sudo apt update && sudo apt upgrade` 即可升级。
+#### 升级网易云音乐
+
+已配置软件源的用户可单独升级网易云音乐。
+
+```sh
+sudo apt update && sudo apt install --only-upgrade netease-cloud-music-webkit
+```
+
+软件源地址和签名公钥保持不变时，使用原配置即可接收后续版本。
 
 ### 下载安装包
 
@@ -139,7 +147,13 @@ sudo apt remove netease-cloud-music-webkit
 bash build-package.sh ./dist
 ```
 
-发布新版时，在签名机器上运行 `bash packaging/build-apt-repository.sh <安装包.deb> <gh-pages检出目录>/apt <签名密钥指纹>`，再提交并推送 `gh-pages`。生成脚本依赖 `dpkg-dev` 和 GnuPG，用 `GNUPGHOME` 指定签名密钥目录。
+每次发布新版时，在签名机器上运行以下命令，将新版安装包加入 APT 软件源并生成签名索引。随后提交并推送 `gh-pages`，APT 才能发现新版。
+
+```sh
+bash packaging/build-apt-repository.sh '<安装包.deb>' '<gh-pages 检出目录>/apt' '<签名密钥指纹>'
+```
+
+脚本依赖 `dpkg-dev` 和 GnuPG。用 `GNUPGHOME` 指定签名密钥目录。
 
 安装运行依赖和 `nodejs` 后执行测试：
 
