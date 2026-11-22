@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 PLAYBACK_LOG_LIMIT = 2 * 1024 * 1024
@@ -59,6 +59,10 @@ section[class*="RightContainer_"] { flex: 1 1 0 !important; min-width: 0 !import
     height: 22px !important;
     max-width: 100%;
     overflow: visible;
+}
+/* The fixed comment backdrop covers the playlist cover and sidebar in WebKit. */
+#page_pc_songlist_commentflow > [class*="Mask_"] > [class*="StyledStickyMask_"] {
+    display: none !important;
 }
 #page_pc_setting #play {
     --music-setting-font-size: 13px;

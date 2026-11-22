@@ -38,7 +38,7 @@
 下载 `.deb` 后，在安装包所在目录运行：
 
 ```sh
-sudo apt install ./netease-cloud-music-webkit_1.3.0_all.deb
+sudo apt install ./netease-cloud-music-webkit_1.3.1_all.deb
 ```
 
 APT 自动安装依赖。安装后在应用菜单中打开“网易云音乐”，点击右上角“登录”扫码。账号、曲库和会员权限由官方网页提供。
