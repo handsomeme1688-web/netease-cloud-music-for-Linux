@@ -243,6 +243,26 @@ def clip_x11_preferences(dialog, *_):
             dialog._rounded_shape_size = shape_size
 
 
+def style_rounded_dialog(dialog, body, heading, action):
+    screen = dialog.get_screen()
+    visual = screen.get_rgba_visual()
+    if visual and screen.is_composited():
+        dialog.set_visual(visual)
+    else:
+        dialog.get_style_context().add_class("opaque")
+    if screen.get_display().__gtype__.name == "GdkX11Display":
+        dialog.connect_after("realize", clip_x11_preferences)
+        dialog.connect("configure-event", clip_x11_preferences)
+        dialog.connect("notify::scale-factor", clip_x11_preferences)
+    css = Gtk.CssProvider()
+    css.load_from_data(PREFERENCES_STYLE)
+    for widget, style in ((dialog, "music-lyric-preferences"), (body, "music-lyric-preferences-body"),
+                          (heading, "music-lyric-preferences-title"), (action, "music-lyric-preferences-done")):
+        context = widget.get_style_context()
+        context.add_class(style)
+        context.add_provider(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+
 class DesktopLyrics(Gtk.Window):
     def __init__(self, display, dismiss, style_path, media_control):
         super().__init__(title="桌面歌词", decorated=False, accept_focus=False,
@@ -281,8 +301,6 @@ class DesktopLyrics(Gtk.Window):
 
         self.style_dialog = None
         self.css = Gtk.CssProvider()
-        self.preferences_css = Gtk.CssProvider()
-        self.preferences_css.load_from_data(PREFERENCES_STYLE)
         self.update_css()
         self.apply_style(self)
         # Keep the buttons' event windows under the same hover surface as the labels.
@@ -481,31 +499,16 @@ class DesktopLyrics(Gtk.Window):
             self.style_dialog.destroy()
         dialog = Gtk.Window(title=title, decorated=False, destroy_with_parent=True, resizable=False,
                             skip_taskbar_hint=True, window_position=Gtk.WindowPosition.CENTER)
-        screen = self.get_screen()
-        dialog.set_screen(screen)
-        if self.get_style_context().has_class("opaque"):
-            dialog.get_style_context().add_class("opaque")
-        else:
-            dialog.set_visual(screen.get_rgba_visual())
+        dialog.set_screen(self.get_screen())
         dialog.set_transient_for(self)
         dialog.set_keep_above(True)
         self.style_dialog = dialog
-        dialog.get_style_context().add_class("music-lyric-preferences")
-        dialog.get_style_context().add_provider(self.preferences_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-        if self.x11:
-            dialog.connect_after("realize", clip_x11_preferences)
-            dialog.connect("configure-event", clip_x11_preferences)
-            dialog.connect("notify::scale-factor", clip_x11_preferences)
         dialog.connect("destroy", self.style_dialog_closed)
         dialog.connect("key-press-event", self.preferences_key_press)
         # Keep the toplevel's opaque-region hint clear so the compositor blends the rounded edge.
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        body.get_style_context().add_class("music-lyric-preferences-body")
-        body.get_style_context().add_provider(self.preferences_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         dialog.add(body)
         heading = Gtk.Label(label=title)
-        heading.get_style_context().add_class("music-lyric-preferences-title")
-        heading.get_style_context().add_provider(self.preferences_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         body.pack_start(heading, False, False, 0)
         grid = Gtk.Grid(row_spacing=12, column_spacing=24)
         body.pack_start(grid, False, False, 0)
@@ -515,8 +518,7 @@ class DesktopLyrics(Gtk.Window):
             grid.attach(caption, 0, row, 1, 1)
             grid.attach(field, 1, row, 1, 1)
         done = Gtk.Button(label="完成", halign=Gtk.Align.END)
-        done.get_style_context().add_class("music-lyric-preferences-done")
-        done.get_style_context().add_provider(self.preferences_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        style_rounded_dialog(dialog, body, heading, done)
         done.connect("clicked", lambda _button: dialog.destroy())
         body.pack_start(done, False, False, 0)
         dialog.show_all()

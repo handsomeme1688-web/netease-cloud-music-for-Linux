@@ -9,13 +9,14 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 import weakref
 from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 PLAYBACK_LOG_LIMIT = 2 * 1024 * 1024
@@ -25,6 +26,7 @@ WINDOW_BUTTON_SIZE = 26
 WINDOW_BUTTON_PITCH = 30
 WINDOW_BUTTON_END = 16
 WINDOW_BUTTON_SPACING = WINDOW_BUTTON_PITCH - WINDOW_BUTTON_SIZE
+WINDOW_CORNER_RADIUS = 16
 # The centre of the last web button is half a slot before the right padding.
 WINDOW_BUTTON_RESERVE = WINDOW_BUTTON_END + 3 * WINDOW_BUTTON_PITCH - WINDOW_BUTTON_SPACING / 2
 WINDOW_DEFAULT_SIZE = (1080, 720)
@@ -59,13 +61,16 @@ section[class*="RightContainer_"] { flex: 1 1 0 !important; min-width: 0 !import
     overflow: visible;
 }
 #page_pc_setting #play {
-    --music-setting-font-size: 14px;
+    --music-setting-font-size: 13px;
+    --music-setting-line-height: 20px;
     --music-setting-label-width: 7em;
-    --music-setting-control-height: 28px;
+    --music-setting-option-height: 24px;
+    --music-setting-option-gap: 8px 16px;
+    --music-setting-section-gap: 18px;
     padding-top: 22px !important;
     padding-bottom: 22px !important;
 }
-#page_pc_setting #play > .play > * { margin-top: 0 !important; margin-bottom: 18px !important; }
+#page_pc_setting #play > .play > * { margin-top: 0 !important; margin-bottom: var(--music-setting-section-gap) !important; }
 #page_pc_setting #play > .play > :last-child { margin-bottom: 0 !important; }
 
 @media (max-width: 1200px) {
@@ -172,7 +177,9 @@ elif os.environ.get("XDG_SESSION_TYPE") == "wayland" and os.environ.get("WAYLAND
     os.environ["GDK_BACKEND"] = "wayland,x11"
 
 try:
+    import cairo
     import gi
+    gi.require_foreign("cairo")
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
     gi.require_version("Gst", "1.0")
@@ -198,6 +205,7 @@ except (ImportError, ValueError) as exc:
 from media_service import MediaService
 from audio_buffer import delivery_script
 from audio_cache import AudioCache
+from music_downloads import FORMATS, MusicDownloads, downloaded_songs, load_preferences, resource_id
 from quality_service import QualityService
 from stream_player import StreamPlayer, transition_settings
 
@@ -330,6 +338,11 @@ class MusicApplication(Gtk.Application):
         self.default_audio_cache_directory = self.cache_dir / "audio"
         self.audio_cache_config = self.config_dir / "audio-cache.json"
         self.audio_cache_directory = self.load_audio_cache_directory()
+        self.download_config = self.config_dir / "downloads.json"
+        downloads = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD)
+        self.default_download_directory = (Path(downloads) if downloads else Path.home() / "Downloads") / APP_NAME
+        self.download_directory, self.download_format = load_preferences(
+            self.download_config, self.default_download_directory)
         self.transition_config = self.config_dir / "playback-transition.json"
         self.transition = self.load_transition()
         self.state_path = self.config_dir / "window.json"
@@ -606,6 +619,12 @@ class MusicApplication(Gtk.Application):
             temp.replace(self.audio_cache_config)
         self.audio_cache_directory = path
 
+    def save_download_preferences(self, directory, format_name):
+        temp = self.download_config.with_suffix(".tmp")
+        temp.write_text(json.dumps({"directory": str(directory), "format": format_name}), encoding="utf-8")
+        temp.replace(self.download_config)
+        self.download_directory, self.download_format = directory, format_name
+
     def load_transition(self):
         try:
             settings = json.loads(self.transition_config.read_text(encoding="utf-8"))
@@ -638,6 +657,10 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.app = app
         self.is_popup = related_view is not None
         self.desktop_lyrics = None
+        self.download_job = None
+        self.download_state = None
+        self.download_scan = None
+        self.connect("destroy", self.stop_download)
         self.set_role(APP_ID)
         self.set_wmclass(APP_ID, APP_ID)
         display = self.get_display()
@@ -654,6 +677,18 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.set_default_size(*self.normal_size)
 
         self.set_decorated(False)
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        self.alpha_corners = bool(visual and screen.is_composited())
+        self.corner_geometry = None
+        self.corner_clip = None
+        if self.alpha_corners:
+            self.set_visual(visual)
+            self.set_app_paintable(True)
+        self.connect_after("realize", self.sync_corner_region)
+        self.connect_after("size-allocate", self.sync_corner_region)
+        self.connect("notify::scale-factor", self.sync_corner_region)
+        self.connect("window-state-event", self.sync_corner_region)
 
         self.webview = create_webview(app.context, related_view)
         settings = WebKit2.Settings()
@@ -711,6 +746,18 @@ class MusicWindow(Gtk.ApplicationWindow):
                 cache_script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
                 WebKit2.UserScriptInjectionTime.END, CACHE_SETTINGS_WORLD,
                 ["https://music.163.com/st/webplayer*"], None))
+            if not self.is_popup:
+                manager.register_script_message_handler_in_world("musicDownload", CACHE_SETTINGS_WORLD)
+                manager.connect("script-message-received::musicDownload", self.music_download_message)
+                script = Path(__file__).resolve().parent / "assets" / "music-downloads.js"
+                manager.add_script(WebKit2.UserScript.new_for_world(
+                    script.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                    WebKit2.UserScriptInjectionTime.END, CACHE_SETTINGS_WORLD,
+                    ["https://music.163.com/st/webplayer*"], None))
+                targets = script.with_name("download-targets.js")
+                manager.add_script(WebKit2.UserScript.new(
+                    targets.read_text(encoding="utf-8"), WebKit2.UserContentInjectedFrames.TOP_FRAME,
+                    WebKit2.UserScriptInjectionTime.END, ["https://music.163.com/st/webplayer*"], None))
             manager.register_script_message_handler_in_world("transitionSettings", CACHE_SETTINGS_WORLD)
             manager.connect("script-message-received::transitionSettings", self.transition_settings_message)
             transition_script = Path(__file__).resolve().parent / "assets" / "transition-settings.js"
@@ -848,7 +895,51 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.connect("delete-event", self.before_close)
         self.connect("window-state-event", self.window_state_changed)
         self.show_all()
+        self.set_focus(self.webview)
         self.update_window_interaction()
+
+    def do_draw(self, cr):
+        if not self.alpha_corners:
+            return Gtk.ApplicationWindow.do_draw(self, cr)
+        width, height = self.get_allocated_width(), self.get_allocated_height()
+        cr.save()
+        if self.corner_clip is not None:
+            radius = min(WINDOW_CORNER_RADIUS, width // 2, height // 2)
+            operator = cr.get_operator()
+            cr.set_operator(cairo.OPERATOR_CLEAR)
+            for x in (0, width - radius):
+                for y in (0, height - radius):
+                    cr.rectangle(x, y, radius, radius)
+            cr.fill()
+            cr.set_operator(operator)
+            # A region of pixel-aligned rectangles also clips WebKit's direct GL drawing.
+            Gdk.cairo_region(cr, self.corner_clip)
+            cr.clip()
+        Gtk.render_background(self.get_style_context(), cr, 0, 0, width, height)
+        handled = Gtk.ApplicationWindow.do_draw(self, cr)
+        cr.restore()
+        return handled
+
+    def sync_corner_region(self, *_):
+        window = self.get_window()
+        if not window:
+            return
+        width, height = self.get_allocated_width(), self.get_allocated_height()
+        square_corners = bool(window.get_state() & (Gdk.WindowState.MAXIMIZED | Gdk.WindowState.FULLSCREEN))
+        geometry = (window, width, height, window.get_scale_factor(), square_corners)
+        if geometry == self.corner_geometry:
+            return
+        from desktop_lyrics import rounded_rectangles
+        self.corner_geometry = geometry
+        radius = 0 if square_corners else WINDOW_CORNER_RADIUS
+        region = cairo.Region([cairo.RectangleInt(*rect) for rect in rounded_rectangles(width, height, radius)])
+        self.corner_clip = None if square_corners else region
+        display = window.get_display()
+        if display.supports_shapes():
+            window.shape_combine_region(region, 0, 0)
+        elif display.supports_input_shapes():
+            window.input_shape_combine_region(region, 0, 0)
+        self.queue_draw()
 
     def create_window_controls(self):
         # Native controls float over the page; there is no title bar or toolbar,
@@ -865,7 +956,7 @@ class MusicWindow(Gtk.ApplicationWindow):
                 min-width: %dpx; min-height: %dpx; padding: 0; margin: 0;
                 border: 0; border-radius: 5px; box-shadow: none;
                 background-image: none; background-color: transparent;
-                color: #7b8090; outline-offset: 2px;
+                color: #7b8090; outline: 1px solid currentColor; outline-offset: 2px;
             }
             button.music-window-control:hover { background-color: rgba(123,128,144,0.08); }
             button.music-window-control:active { background-color: rgba(123,128,144,0.14); }
@@ -888,10 +979,17 @@ class MusicWindow(Gtk.ApplicationWindow):
             if name == "close":
                 context.add_class("music-window-close")
             context.add_provider(css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            button.connect("button-press-event", self.window_control_pressed)
             button.connect("clicked", callback)
             self.window_controls.pack_start(button, False, False, 0)
             self.control_buttons[name] = button
         self.overlay.add_overlay(self.window_controls)
+
+    def window_control_pressed(self, _button, event):
+        if event.button == 1 and self.get_focus() in self.control_buttons.values():
+            self.set_focus(None)
+            self.stack.child_focus(Gtk.DirectionType.TAB_FORWARD)
+        return False
 
     def create_window_interaction(self):
         # A borderless window still needs native movement and resize grips.
@@ -1286,6 +1384,16 @@ class MusicWindow(Gtk.ApplicationWindow):
             self.choose_cache_directory()
         elif action == "reset" and self.cache_chooser is None:
             self.change_cache_directory(self.app.default_audio_cache_directory)
+        elif action == "download-read":
+            self.show_download_preferences()
+        elif action == "download-choose" and self.cache_chooser is None:
+            self.choose_download_directory()
+        elif action == "download-reset":
+            self.change_download_preferences(self.app.default_download_directory, self.app.download_format)
+        elif action.startswith("download-format:"):
+            format_name = action.split(":", 1)[1]
+            if format_name in FORMATS:
+                self.change_download_preferences(self.app.download_directory, format_name)
 
     def choose_cache_directory(self):
         chooser = Gtk.FileChooserDialog(title="选择音乐缓存存放位置", transient_for=self,
@@ -1324,6 +1432,152 @@ class MusicWindow(Gtk.ApplicationWindow):
         args = json.dumps([str(path), path != self.app.default_audio_cache_directory, error])
         script = "window.updateMusicCacheDirectory?.(..." + args + ")"
         self.webview.run_javascript_in_world(script, CACHE_SETTINGS_WORLD, None, None, None)
+
+    def choose_download_directory(self):
+        chooser = Gtk.FileChooserDialog(title="选择音乐下载目录", transient_for=self,
+                                        modal=True, destroy_with_parent=True,
+                                        action=Gtk.FileChooserAction.SELECT_FOLDER)
+        self.cache_chooser = chooser
+        chooser.add_buttons("取消", Gtk.ResponseType.CANCEL, "选择", Gtk.ResponseType.ACCEPT)
+        current = self.app.download_directory
+        if current.is_dir():
+            chooser.set_current_folder(str(current))
+        elif current.parent.is_dir():
+            chooser.set_current_folder(str(current.parent))
+        try:
+            folder = chooser.get_filename() if chooser.run() == Gtk.ResponseType.ACCEPT else None
+        finally:
+            chooser.destroy()
+            self.cache_chooser = None
+        if folder:
+            self.change_download_preferences(Path(folder), self.app.download_format)
+
+    def change_download_preferences(self, directory, format_name):
+        try:
+            self.app.save_download_preferences(directory, format_name)
+        except OSError:
+            self.show_download_preferences("无法保存下载设置")
+        else:
+            self.show_download_preferences()
+            self.refresh_downloaded_songs(clear=True)
+
+    def show_download_preferences(self, error=""):
+        if not self.get_window() or not is_player_uri(self.webview.get_uri()):
+            return
+        args = json.dumps([str(self.app.download_directory), self.app.download_format,
+                           self.app.download_directory != self.app.default_download_directory, error])
+        self.webview.run_javascript_in_world("window.updateMusicDownloadPreferences?.(..." + args + ")",
+                                            CACHE_SETTINGS_WORLD, None, None, None)
+
+    def deliver_download(self, callback, *args):
+        if self.get_window() and is_player_uri(self.webview.get_uri()):
+            script = f"window.{callback}?.(...{json.dumps(args)})"
+            self.webview.run_javascript_in_world(script, CACHE_SETTINGS_WORLD, None, None, None)
+
+    def refresh_downloaded_songs(self, clear=False):
+        if self.download_scan is not None and not clear:
+            return
+        directory, format_name = self.app.download_directory, self.app.download_format
+        scan = set()
+        self.download_scan = scan
+        if clear:
+            self.deliver_download("updateMusicDownloadedSongs", [])
+
+        def publish(found):
+            if self.download_scan is scan:
+                self.download_scan = None
+                self.deliver_download("updateMusicDownloadedSongs", sorted(found | scan))
+            return False
+
+        def read():
+            GLib.idle_add(publish, downloaded_songs(directory, format_name))
+
+        threading.Thread(target=read, daemon=True).start()
+
+    def stop_download(self, *_):
+        if self.download_job:
+            self.download_job["stop"].set()
+            self.download_job["cookies"].cancel()
+
+    def music_download_message(self, _manager, result):
+        if not self.get_window() or not is_player_uri(self.webview.get_uri()):
+            return
+        value = result.get_js_value().to_string()
+        if value == "read":
+            self.deliver_download("updateMusicDownloadJob", self.download_state, False)
+            self.refresh_downloaded_songs()
+            return
+        if value == "cancel":
+            if self.download_job:
+                self.stop_download()
+                self.download_state = dict(self.download_state, message="正在取消…", cancelling=True)
+                self.deliver_download("updateMusicDownloadJob", self.download_state, False)
+            return
+        if len(value) > 32:
+            return
+        kind, _, raw_id = value.partition(":")
+        identifier = resource_id(raw_id)
+        if kind not in ("track", "playlist") or not identifier:
+            return
+        if self.download_job:
+            self.deliver_download("updateMusicDownloadJob", self.download_state, True)
+            return
+        format_name, directory = self.app.download_format, self.app.download_directory
+        job = {"stop": threading.Event(), "cookies": Gio.Cancellable()}
+        self.download_job = job
+
+        def report(message, fraction, running, show=False):
+            self.download_state = {"message": message, "fraction": fraction, "running": running}
+            self.deliver_download("updateMusicDownloadJob", self.download_state, show)
+
+        report(f"正在获取「{FORMATS[format_name].label}」下载授权…", 0, True, show=True)
+
+        def progress(done, total, message):
+            if self.download_job is job and not job["stop"].is_set():
+                report(message, done / total, True)
+            return False
+
+        def saved(song):
+            if self.download_job is job and (directory, format_name) == (
+                    self.app.download_directory, self.app.download_format):
+                if self.download_scan is not None:
+                    self.download_scan.add(song)
+                self.deliver_download("markMusicSongDownloaded", song)
+            return False
+
+        def finished(message):
+            if self.download_job is job:
+                self.download_job = None
+                report(message, self.download_state["fraction"], False)
+                self.refresh_downloaded_songs()
+            return False
+
+        def run(cookies):
+            task = MusicDownloads(cookies, job["stop"])
+            status = task.run(kind, identifier, directory, format_name,
+                              lambda *args: GLib.idle_add(progress, *args),
+                              lambda song: GLib.idle_add(saved, song))
+            GLib.idle_add(finished, status)
+
+        def authorized(manager, response):
+            if self.download_job is not job:
+                return
+            if job["stop"].is_set():
+                finished("下载已取消")
+                return
+            try:
+                cookies = {entry.get_name(): entry.get_value()
+                           for entry in manager.get_cookies_finish(response) or []}
+            except GLib.Error:
+                finished("无法读取登录状态")
+                return
+            if not cookies.get("MUSIC_U"):
+                finished("请先登录网易云音乐")
+                return
+            threading.Thread(target=run, args=(cookies,), daemon=True).start()
+
+        manager = self.app.manager.get_cookie_manager()
+        manager.get_cookies(HOME_URL, job["cookies"], authorized)
 
     def transition_settings_message(self, _manager, result):
         if not self.get_window() or not is_player_uri(self.webview.get_uri()):

@@ -41,7 +41,7 @@ for requirement in 'python3 3.8' 'python3-gi 3.36' 'gir1.2-gtk-3.0 3.24'; do
     exit 1
   fi
 done
-packages=(python3 python3-gi gir1.2-gtk-3.0 "$webkit_package"
+packages=(python3 python3-gi python3-gi-cairo gir1.2-gtk-3.0 "$webkit_package"
           ca-certificates openssl librsvg2-common
           gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good
           gstreamer1.0-libav gstreamer1.0-alsa)

@@ -24,6 +24,10 @@ def record(event, value):
         stream.write(json.dumps([event, value]) + "\\n")
 
 
+def require_foreign(namespace):
+    assert namespace == "cairo"
+
+
 def require_version(namespace, version):
     global selected_api
     if namespace == "WebKit2":
@@ -86,6 +90,7 @@ class WebKitSelectionTests(unittest.TestCase):
                 textwrap.dedent(GI_STUB), encoding="utf-8")
             (package / "repository.py").write_text(
                 textwrap.dedent(REPOSITORY_STUB), encoding="utf-8")
+            (root / "cairo.py").touch()
             log = root / "imports.jsonl"
             env = os.environ.copy()
             env.update({
