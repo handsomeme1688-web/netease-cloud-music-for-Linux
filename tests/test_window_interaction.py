@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 spec = importlib.util.spec_from_file_location(
@@ -148,6 +148,38 @@ class WindowInteractionTests(unittest.TestCase):
         self.assertEqual(window.normal_size, (1000, 700))
         window.sync_page_controls.assert_not_called()
         window.position_window_controls.assert_not_called()
+
+    def test_native_content_draw_receives_rectangular_corner_clip(self):
+        cairo = app.cairo
+        size = (80, 60)
+        native = Mock()
+        native.get_display.return_value.supports_shapes.return_value = False
+        native.get_display.return_value.supports_input_shapes.return_value = True
+        native.get_scale_factor.return_value = 1
+        window = SimpleNamespace(alpha_corners=True, corner_geometry=None, get_style_context=Mock(),
+                                 get_window=lambda: native, queue_draw=Mock(),
+                                 get_allocated_width=lambda: size[0], get_allocated_height=lambda: size[1])
+        maximized, fullscreen = app.Gdk.WindowState.MAXIMIZED, app.Gdk.WindowState.FULLSCREEN
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, *size)
+        context = cairo.Context(surface)
+
+        def draw_content(_window, cr):
+            self.assertTrue(cr.copy_clip_rectangle_list())
+            self.assertEqual(cr.in_clip(0.5, 0.5), square_corners)
+            self.assertEqual(cr.in_clip(79.5, 59.5), square_corners)
+            self.assertTrue(cr.in_clip(40, 30))
+            return False
+
+        with patch.object(app.Gtk, "render_background"), patch.object(
+                app.Gtk.ApplicationWindow, "do_draw", side_effect=draw_content):
+            for state, square_corners in ((0, False), (maximized, True), (maximized | fullscreen, True),
+                                          (maximized, True), (0, False), (fullscreen, True), (0, False)):
+                with self.subTest(state=state):
+                    native.get_state.return_value = state
+                    app.MusicWindow.sync_corner_region(window)
+                    region = native.input_shape_combine_region.call_args.args[0]
+                    self.assertEqual(region.contains_point(0, 0), square_corners)
+                    self.assertFalse(app.MusicWindow.do_draw(window, context))
 
 
 if __name__ == "__main__":

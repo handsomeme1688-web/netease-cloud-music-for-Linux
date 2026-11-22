@@ -19,7 +19,7 @@ const intervals=[],timers=new Map();let timerId=0;
 const setInterval=fn=>(intervals.push(fn),intervals.length),clearInterval=()=>{};
 const setTimeout=(fn,delay)=>{timers.set(++timerId,{fn,delay});return timerId;};
 const clearTimeout=id=>timers.delete(id),requestAnimationFrame=fn=>fn();
-const listeners=new Map();
+const listeners=new Map(),documentListeners=new Map(),observers=[];
 const window={
  addEventListener(name,fn){listeners.set(name,[...(listeners.get(name)||[]),fn]);},
  dispatchEvent(event){for(const listener of listeners.get(event.type)||[])listener(event);}
@@ -49,13 +49,13 @@ class Element{
   if(match)result.push(child);visit(child);
  }};visit(this);return result;}
  querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
- getBoundingClientRect(){return{top:760,bottom:800,left:1040,right:1100,width:60,height:40};}
+ getBoundingClientRect(){return this.bounds||{top:760,bottom:800,left:1040,right:1100,width:60,height:40};}
  focus(){document.activeElement=this;}
  click(){if(!this.disabled&&this.events.click)this.events.click({target:this,stopPropagation(){}});}
  canPlayType(){return codecSupport?'probably':'';}
 }
 const document={head:new Element('head'),body:new Element('body'),activeElement:null,
- createElement:tag=>new Element(tag),addEventListener:()=>{},
+ createElement:tag=>new Element(tag),addEventListener:(type,fn)=>documentListeners.set(type,fn),
  querySelector:selector=>selector==='#page_pc_setting #play > .play'?settings:document.body.querySelector(selector),
  querySelectorAll:selector=>selector.startsWith('#page_pc_mini_bar')?(detailVisible?[bar,detailBar]:[bar]):document.body.querySelectorAll(selector)};
 const bar=new Element('div');document.body.appendChild(bar);
@@ -63,7 +63,7 @@ const settings=new Element('div');document.body.appendChild(settings);
 const detailBar=new Element('div');detailBar.className='vinyl-page-bar-wrapper';
 document.body.appendChild(detailBar);
 let detailVisible=false;
-class MutationObserver{constructor(fn){this.callback=fn;}observe(){}disconnect(){}}
+class MutationObserver{constructor(fn){this.callback=fn;}observe(_,options){this.options=options;observers.push(this);}disconnect(){}}
 let state={host:{isPlusVip:true,isVinylVip:true,isAnonymous:false},configCenter:{},
  setting:{quantity:{listen:320,listenReg:320,listenAnon:192}},
  playing:{resourceTrackId:123,playId:1,resourcePlayingQuality:320,playingState:2,resourceType:'track',
@@ -190,6 +190,33 @@ store.subscribe(()=>updates++);
         self.assertEqual(self.evaluate("document.body.querySelectorAll('.ncm-quality-button').length").to_int32(), 2)
         self.assertEqual(self.evaluate("settings.querySelectorAll('.ncm-quality-setting-radio').length").to_int32(), 9)
         self.assertEqual(self.evaluate("settings.querySelectorAll('.ncm-quality-setting-radio').filter(input=>input.checked).length").to_int32(), 1)
+
+    def test_both_bars_have_quality_ready_before_detail_animation(self):
+        self.evaluate('''
+const miniButton=document.body.querySelector('.ncm-quality-mini');
+const detailButton=document.body.querySelector('.ncm-quality-detail');
+const observer=observers.find(item=>item.options.attributeFilter?.includes('class'));
+bar.isConnected=true;
+detailBar.nodeType=1;
+detailBar.matches=()=>true;
+detailBar.isConnected=true;
+detailBar.bounds={...detailBar.getBoundingClientRect(),top:845,bottom:885};
+detailVisible=true;
+observer.callback([{type:'childList',target:document.body,addedNodes:[detailBar]}]);
+''')
+        self.assertTrue(self.evaluate(
+            '!miniButton.hidden && !detailButton.hidden && miniButton.parentNode===bar && detailButton.parentNode===detailBar'
+        ).to_boolean())
+        self.evaluate('''
+documentListeners.get('transitionend')({target:detailBar});
+''')
+        self.assertTrue(self.evaluate('!miniButton.hidden && !detailButton.hidden').to_boolean())
+        self.evaluate('''
+detailVisible=false;
+detailBar.isConnected=false;
+observer.callback([{type:'childList',target:document.body,addedNodes:[]}]);
+''')
+        self.assertTrue(self.evaluate('!miniButton.hidden && detailButton.hidden').to_boolean())
 
     def test_vivid_extends_request_and_response_mapping(self):
         self.assertEqual(self.evaluate("requireModule('maps').q.get(6999000)").to_string(), 'vivid')

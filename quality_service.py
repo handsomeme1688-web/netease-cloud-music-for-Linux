@@ -18,10 +18,10 @@ FIELDS = {'id', 'code', 'level', 'type', 'br', 'size', 'md5', 'expi', 'flag', 'f
           'volumeDelta', 'rightSource', 'podcastCtrp', 'encodeType'}
 
 
-def encode_request(data):
+def encode_request(data, path=PATH):
     text = json.dumps(data, separators=(',', ':'))
-    digest = hashlib.md5(('nobody' + PATH + 'use' + text + 'md5forencrypt').encode()).hexdigest()
-    plain = (PATH + '-36cd479b6b5-' + text + '-36cd479b6b5-' + digest).encode()
+    digest = hashlib.md5(('nobody' + path + 'use' + text + 'md5forencrypt').encode()).hexdigest()
+    plain = (path + '-36cd479b6b5-' + text + '-36cd479b6b5-' + digest).encode()
     encrypted = subprocess.run(['openssl', 'enc', '-aes-128-ecb', '-K', b'e82ckenh8dichen8'.hex()],
         input=plain, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=3).stdout
     return urlencode({'params': encrypted.hex().upper()}).encode()

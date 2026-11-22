@@ -65,6 +65,8 @@
     const streamOwners = new WeakMap();
     let control, detailControl, settingRow, settingStatus;
     const settingChoices = new Map();
+    const playerBarSelector = '#page_pc_mini_bar .right-side .right';
+    let playerBars = [];
     let signature = '', scheduled = false, notice = '', lastTrack = '';
     const trackId = state => String(state.playing.resourceTrackId || '');
     const resourceId = state => String(state.playing.curPlaying?.resourceId || trackId(state));
@@ -84,7 +86,7 @@
             progressId.split(/[_|]/, 1)[0] === id);
         const position = owner && howl._state === 'loaded' ? currentPosition() :
             matches ? lyricProgress.current : undefined;
-        return {id, title: id ? (playing.curPlaying?.track?.name || playing.resourceTrackName || '') : '',
+        return {id, kind: playing.resourceType, title: id ? (playing.curPlaying?.track?.name || playing.resourceTrackName || '') : '',
             stream: owner ? window.__musicStreamingId?.() : '', position, advancing: playing.playingState === 2};
     }});
     Object.defineProperty(window, '__musicStreamType', {value: url => sourceTypes.get(sourceKey(url))});
@@ -598,7 +600,7 @@
         footer.textContent = [preferred && '默认：' + preferred.name, current, notice].filter(Boolean).join(' · ');
     }
     function placeBadge(button, bar) {
-        button.hidden = !bar;
+        if (button.hidden !== !bar) button.hidden = !bar;
         if (!bar) return;
         if (button.parentNode !== bar) bar.insertBefore(button, bar.firstChild);
         const icon = button === detailControl && bar.querySelector('svg');
@@ -606,10 +608,11 @@
     }
     function place() {
         scheduled = false;
-        const bars = [...document.querySelectorAll('#page_pc_mini_bar .right-side .right')].filter(visible);
-        const detailBar = bars.find(bar => bar.closest('.vinyl-page-bar-wrapper'));
-        placeBadge(control, detailBar ? null : bars[0]);
-        placeBadge(detailControl, detailBar);
+        playerBars = [...document.querySelectorAll(playerBarSelector)];
+        const details = playerBars.filter(bar => bar.closest('.vinyl-page-bar-wrapper'));
+        const minis = playerBars.filter(bar => !details.includes(bar));
+        placeBadge(control, minis.find(visible) || minis[0]);
+        placeBadge(detailControl, details.find(visible) || details[0]);
         const settings = document.querySelector('#page_pc_setting #play > .play');
         if (settings && settingRow.parentNode !== settings) settings.insertBefore(settingRow, settings.firstChild);
         sync();
@@ -732,10 +735,27 @@
                 clearPending(); emit('音质加载失败，请重试或选择其他档位');
             }
         });
-        const observer = new MutationObserver(() => {
+        const containsBar = node => playerBars.some(bar => node.contains(bar));
+        const schedulePlacement = () => {
             if (!scheduled) { scheduled = true; requestAnimationFrame(place); }
+        };
+        const addsBar = node => node.nodeType === 1 &&
+            (node.matches(playerBarSelector) || node.querySelector(playerBarSelector));
+        const observer = new MutationObserver(records => {
+            if (playerBars.some(bar => !bar.isConnected) ||
+                records.some(record => [...record.addedNodes].some(addsBar))) {
+                place();
+            } else if (records.some(record => record.type === 'childList' || containsBar(record.target))) {
+                schedulePlacement();
+            }
         });
-        observer.observe(document.body, {childList: true, subtree: true});
+        observer.observe(document.body, {childList: true, subtree: true, attributes: true,
+            attributeFilter: ['class', 'style', 'hidden']});
+        for (const type of ['transitionend', 'transitioncancel', 'animationend', 'animationcancel']) {
+            document.addEventListener(type, event => {
+                if (containsBar(event.target)) schedulePlacement();
+            }, true);
+        }
         store.subscribe(sync); place();
         window.addEventListener('pageshow', place);
         window.addEventListener('pagehide', () => { clearPending(); discardPreload(); });
@@ -746,12 +766,20 @@
 .ncm-quality-button[hidden]{display:none}
 .ncm-quality-mini,.ncm-quality-detail{position:static;flex:none}
 .ncm-quality-detail{opacity:1}
-.ncm-quality-setting-row{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 8px;font-size:var(--music-setting-font-size,14px);line-height:20px}
-.ncm-quality-setting-label{flex:0 0 var(--music-setting-label-width,7em)}
-.ncm-quality-setting-content{flex:1 1 16em;min-width:0}
-.ncm-quality-setting-options{display:flex;flex-wrap:wrap;gap:4px 20px}
-.ncm-quality-setting-option{display:inline-flex;align-items:center;gap:8px;min-height:24px;white-space:nowrap;cursor:pointer}
-.ncm-quality-setting-radio{appearance:auto;flex:none;width:16px;height:16px;margin:0;accent-color:#ff3348}
+.ncm-quality-setting-row{display:grid;grid-template-columns:var(--music-setting-label-width,7em) minmax(0,1fr);
+    align-items:start;column-gap:8px;font-size:var(--music-setting-font-size,13px);line-height:var(--music-setting-line-height,20px)}
+.ncm-quality-setting-label{display:flex;align-items:center;min-height:var(--music-setting-option-height,24px)}
+.ncm-quality-setting-content{min-width:0}
+.ncm-quality-setting-options{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,7.1em),1fr));
+    max-width:44em;gap:var(--music-setting-option-gap,8px 16px)}
+.ncm-quality-setting-option{display:inline-flex;align-items:center;gap:8px;min-height:var(--music-setting-option-height,24px);
+    font:inherit;white-space:nowrap;cursor:pointer}
+.ncm-quality-setting-radio{appearance:none;box-sizing:border-box;flex:none;width:16px;height:16px;margin:0;
+    border:1px solid var(--colorBlack7,#a3aab8);border-radius:50%;cursor:pointer}
+.ncm-quality-setting-radio:checked{border-color:var(--colorPrimary1,#ff3348);
+    background:radial-gradient(circle,var(--colorPrimary1,#ff3348) 4px,transparent 4.5px)}
+.ncm-quality-setting-radio:focus-visible{outline:2px solid var(--colorPrimary1,#ff3348);outline-offset:2px}
+.ncm-quality-setting-radio:disabled{opacity:.55;cursor:default}
 .ncm-quality-setting-radio:disabled + span{opacity:.55;cursor:default}
 .ncm-quality-setting-status:not(:empty){margin-top:4px;font-size:.9em}
 .ncm-quality-button:hover,.ncm-quality-button[aria-expanded=true]{color:#ba8c45;opacity:1}
