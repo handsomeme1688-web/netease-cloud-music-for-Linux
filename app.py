@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 PLAYBACK_LOG_LIMIT = 2 * 1024 * 1024
@@ -692,7 +692,6 @@ class MusicWindow(Gtk.ApplicationWindow):
         self.connect_after("realize", self.sync_corner_region)
         self.connect_after("size-allocate", self.sync_corner_region)
         self.connect("notify::scale-factor", self.sync_corner_region)
-        self.connect("window-state-event", self.sync_corner_region)
 
         self.webview = create_webview(app.context, related_view)
         settings = WebKit2.Settings()
@@ -924,25 +923,30 @@ class MusicWindow(Gtk.ApplicationWindow):
         cr.restore()
         return handled
 
-    def sync_corner_region(self, *_):
+    def sync_corner_region(self, *_, state=None):
         window = self.get_window()
         if not window:
             return
         width, height = self.get_allocated_width(), self.get_allocated_height()
-        square_corners = bool(window.get_state() & (Gdk.WindowState.MAXIMIZED | Gdk.WindowState.FULLSCREEN))
+        if state is None:
+            state = window.get_state()
+        square_corners = bool(state & (Gdk.WindowState.MAXIMIZED | Gdk.WindowState.FULLSCREEN))
         geometry = (window, width, height, window.get_scale_factor(), square_corners)
         if geometry == self.corner_geometry:
             return
-        from desktop_lyrics import rounded_rectangles
         self.corner_geometry = geometry
-        radius = 0 if square_corners else WINDOW_CORNER_RADIUS
-        region = cairo.Region([cairo.RectangleInt(*rect) for rect in rounded_rectangles(width, height, radius)])
-        self.corner_clip = None if square_corners else region
+        region = None
+        if not square_corners:
+            from desktop_lyrics import rounded_rectangles
+            region = cairo.Region([cairo.RectangleInt(*rect) for rect in
+                                   rounded_rectangles(width, height, WINDOW_CORNER_RADIUS)])
+        self.corner_clip = region
         display = window.get_display()
-        if display.supports_shapes():
+        # A native X11 bounding mask can clip newly allocated content during resize.
+        if not self.alpha_corners and display.supports_shapes():
             window.shape_combine_region(region, 0, 0)
         elif display.supports_input_shapes():
-            window.input_shape_combine_region(region, 0, 0)
+            self.input_shape_combine_region(region)
         self.queue_draw()
 
     def create_window_controls(self):
@@ -1225,6 +1229,8 @@ class MusicWindow(Gtk.ApplicationWindow):
             self.maximize()
 
     def window_state_changed(self, _window, event):
+        if event.changed_mask & (Gdk.WindowState.MAXIMIZED | Gdk.WindowState.FULLSCREEN):
+            self.sync_corner_region(state=event.new_window_state)
         # Focus/minimize events must not rebuild the image: Gtk.Image clears its
         # old content and queues a resize even when the icon name is unchanged.
         if event.changed_mask & Gdk.WindowState.MAXIMIZED:

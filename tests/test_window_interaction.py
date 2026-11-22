@@ -22,7 +22,7 @@ def make_window(state=0, resizable=True):
         resize_handles=[Mock() for _ in range(8)], drag_handle=Mock(),
         drag_gap=Mock(), drag_gap_bounds=(200, 18, 160, 42),
         window_controls=Mock(), control_buttons={"maximize": Mock()},
-        update_window_interaction=Mock(), is_maximized=lambda: bool(
+        update_window_interaction=Mock(), sync_corner_region=Mock(), is_maximized=lambda: bool(
             state & app.Gdk.WindowState.MAXIMIZED),
         webview=Mock(), sync_page_controls=Mock(), position_window_controls=Mock())
 
@@ -134,6 +134,7 @@ class WindowInteractionTests(unittest.TestCase):
         self.assertFalse(app.MusicWindow.window_state_changed(window, window, event))
         self.assertEqual(window.control_buttons["maximize"].mock_calls, [])
         window.update_window_interaction.assert_not_called()
+        window.sync_corner_region.assert_not_called()
         window.sync_page_controls.assert_not_called()
         window.position_window_controls.assert_not_called()
 
@@ -144,6 +145,7 @@ class WindowInteractionTests(unittest.TestCase):
                                 new_window_state=app.Gdk.WindowState.MAXIMIZED)
         app.MusicWindow.window_state_changed(window, window, event)
         window.update_window_interaction.assert_called_once_with(app.Gdk.WindowState.MAXIMIZED)
+        window.sync_corner_region.assert_called_once_with(state=app.Gdk.WindowState.MAXIMIZED)
         app.MusicWindow.configure(window, window, SimpleNamespace(width=1920, height=1080))
         self.assertEqual(window.normal_size, (1000, 700))
         window.sync_page_controls.assert_not_called()
@@ -153,11 +155,12 @@ class WindowInteractionTests(unittest.TestCase):
         cairo = app.cairo
         size = (80, 60)
         native = Mock()
-        native.get_display.return_value.supports_shapes.return_value = False
+        native.get_display.return_value.supports_shapes.return_value = True
         native.get_display.return_value.supports_input_shapes.return_value = True
         native.get_scale_factor.return_value = 1
         window = SimpleNamespace(alpha_corners=True, corner_geometry=None, get_style_context=Mock(),
                                  get_window=lambda: native, queue_draw=Mock(),
+                                 input_shape_combine_region=Mock(),
                                  get_allocated_width=lambda: size[0], get_allocated_height=lambda: size[1])
         maximized, fullscreen = app.Gdk.WindowState.MAXIMIZED, app.Gdk.WindowState.FULLSCREEN
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, *size)
@@ -177,9 +180,33 @@ class WindowInteractionTests(unittest.TestCase):
                 with self.subTest(state=state):
                     native.get_state.return_value = state
                     app.MusicWindow.sync_corner_region(window)
-                    region = native.input_shape_combine_region.call_args.args[0]
-                    self.assertEqual(region.contains_point(0, 0), square_corners)
+                    region = window.input_shape_combine_region.call_args.args[0]
+                    self.assertIs(region, window.corner_clip)
+                    if square_corners:
+                        self.assertIsNone(region)
+                    else:
+                        self.assertFalse(region.contains_point(0, 0))
                     self.assertFalse(app.MusicWindow.do_draw(window, context))
+        native.shape_combine_region.assert_not_called()
+
+    def test_x11_without_compositing_clears_shape_before_window_resizes(self):
+        native = Mock()
+        native.get_display.return_value.supports_shapes.return_value = True
+        native.get_state.return_value = app.Gdk.WindowState(0)
+        window = SimpleNamespace(alpha_corners=False, corner_geometry=None, get_window=lambda: native,
+                                 get_allocated_width=lambda: 1000, get_allocated_height=lambda: 700,
+                                 queue_draw=Mock())
+
+        app.MusicWindow.sync_corner_region(window)
+        normal = native.shape_combine_region.call_args.args[0]
+        self.assertFalse(normal.contains_point(0, 0))
+        self.assertTrue(normal.contains_point(500, 350))
+
+        app.MusicWindow.sync_corner_region(window, state=app.Gdk.WindowState.MAXIMIZED)
+        native.shape_combine_region.assert_called_with(None, 0, 0)
+
+        app.MusicWindow.sync_corner_region(window)
+        native.shape_combine_region.assert_called_with(normal, 0, 0)
 
 
 if __name__ == "__main__":
