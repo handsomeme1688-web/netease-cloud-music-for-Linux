@@ -4,7 +4,7 @@ umask 022
 
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 output_dir=${1:-"$source_dir/dist"}
-version=1.3.0
+version=1.3.1
 package_name=netease-cloud-music-webkit
 
 for command in dpkg-deb tar gzip install python3 mkdir mktemp cp du cut; do
