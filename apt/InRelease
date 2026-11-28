@@ -5,23 +5,23 @@ Origin: NetEase Cloud Music for Linux
 Label: NetEase Cloud Music for Linux
 Suite: ./
 Codename: ./
-Date: Sun, 22 Nov 2026 09:41:10 +0000
+Date: Sat, 28 Nov 2026 16:02:46 +0000
 Acquire-By-Hash: yes
 Description: NetEase Cloud Music packages for Debian and Ubuntu
 SHA256:
- 0f4bae356574a4f0e81bb1f7a05bd2344c78d2b00eb714e05633b64900801468 1211 Packages
- e02bed1c175b49c6e770fd47db4d9d3b260e75e1813912de541dd7eed6444770 735 Packages.gz
+ 88d37a05f9316fb2490712632dfbc30607fd7e98858260e2c874d228f71a2d1d 1211 Packages
+ eac8711dffc06376beaa1a5443b0887e1a807f8da13a8fadd9d30530f236991e 736 Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iQGzBAEBCAAdFiEE2FB1RosFZQlWS3jZ+FJw+Ulh+zsFAmsCuLYACgkQ+FJw+Ulh
-+zuY5gv9HasSrl86JtXPKVp4A2Lzq1zX8iGUlx+d1wsEhysQA5sSjVMeeipFrfzL
-F2P+8flYEyGz3k4PJF6mFJYGqoGVYleJ40XnD1mv13Ice6QogVhhSfyztae3ZL2T
-wqLlG03GhxmIkKNo2/MQ+rIwgz/8XmE7WgnaAq4WtoIywKoNy27OoBecYptIa9Z6
-6dPBF9wcCe/6qxt2g61WiOBBDDCiCWkVOibja0ePUlDSwbgQM/QYu/EGjjSPQIfY
-bto9SRe06iD5f+OAzYUrAcLU5B1sTEdVTXLZhxBXmTfbMdTDeUmsl380Z6RToNTj
-HM5JSJlUrSFBs8ka1/f5KZLjk6nLj1MXb9Zon+xIppuVuCIsQN0NE1YqZAVmsxP/
-uIGyilwkVdnt9oovl0KmAYrfdR33ayXjOkEb1W39F6ZowitDUS5HMjjyouv9ytyJ
-nNMe4OYDp4GZmfJa/eSyMn+swLafNP2ejZwzUeY0g9BdK3ur4t8Sj26pR8IzsS4l
-v4PXz5ex
-=suR3
+iQGzBAEBCAAdFiEE2FB1RosFZQlWS3jZ+FJw+Ulh+zsFAmsK+yYACgkQ+FJw+Ulh
++zsp3wwAhbGubTUJErTBlSNSontdDSD0MeKLFK6IRA0lVwGL99qkPgMNarr0AM/U
+AiTuI+CgeKdNW8clOsgPVigVySw/nd+XXbCyO1MserJGZXciT712HDb/hVwfuF3w
+2iPHCluN9BcyUtA+tGojG5QTnDOIWIOKQq1qyCBIFiRawsyAAQmCzEDjXBMo6VYQ
+xvjxPrPp8hDdXXhBuAtOMRgEZVnVzJrqKVLP6cA+qgsAFgC8MBWCAl9vhc5NMBxy
+A46ozpQB66SunCaNiOLKvX9cgMEUlacxF07NpZaKFiz/rQabERphvb77HqlniCLW
+t9vqnOz4lkTIkZEJ6rn5ANA2eGAltw0JiB2bbMIFNRjBLqdZRyGHDniMi2k7BOGI
+TW1QOepzUYDki/oA5hQrhSvRCAVXISwNQi+MmVrVK4WXzKNedIwg/ac0yCgW1J+f
+yOjHExLvVWY6X22y67wVMwCpk2Sju9Ui0Z6xOS5nJ3CvZwIwLnpDPpCH5xQDkOs/
+ioNMVlfc
+=eTdl
 -----END PGP SIGNATURE-----
