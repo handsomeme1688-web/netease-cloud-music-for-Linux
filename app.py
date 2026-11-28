@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 
 APP_ID = "io.github.neteasecloudmusic.WebPlayer"
 APP_NAME = "网易云音乐"
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 HOME_URL = "https://music.163.com/st/webplayer"
 STORAGE_NAME = "netease-cloud-music"
 PLAYBACK_LOG_LIMIT = 2 * 1024 * 1024
