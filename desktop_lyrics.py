@@ -397,8 +397,9 @@ class DesktopLyrics(Gtk.Window):
         self.rate = 1.0
         self.status = ""
         self.index = self.last = self.highlight_frame = self.input_shape = None
-        self.apply_lock()
+        # Initialize the playback buttons before hiding their group for a saved lock.
         self.panel.show_all()
+        self.apply_lock()
         self.render()
 
     def apply_style(self, widget):
